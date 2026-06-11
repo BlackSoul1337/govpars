@@ -1,0 +1,6 @@
+[database]
+url_env = "DATABASE_URL"
+pool_size = 10
+max_overflow = 20
+statement_timeout_seconds = 60
+

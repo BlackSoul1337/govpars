@@ -1,0 +1,35 @@
+{
+  "id": 4445808,
+  "advertId": 1227366,
+  "lotNumber": "4445808",
+  "nameRu": "Дрель",
+  "nameKk": "Бұрғы",
+  "status": "PUBLISHED",
+  "beginDate": "2026-06-09T17:59:00",
+  "endDate": "2026-06-17T10:00:00",
+  "truCode": "257330.930.000030",
+  "briefDescriptionRu": "электрическая",
+  "quantity": 1,
+  "measureNameRu": "Штука",
+  "unitPrice": 51500,
+  "totalSum": 51500,
+  "prepaymentPercent": 0,
+  "finalPaymentPercent": 100,
+  "customer": {
+    "id": 15,
+    "bin": "000000000015",
+    "nameRu": "АО QAZAQGAZ AIMAQ"
+  },
+  "deliveryPlaces": [
+    {"id": 10, "country": "КАЗАХСТАН", "address": "г. Алматы", "quantity": 1}
+  ],
+  "documents": [
+    {
+      "uid": "file-1",
+      "fileName": "technical.pdf",
+      "fileSize": 1024,
+      "contentType": "application/pdf",
+      "hash": "deadbeef"
+    }
+  ]
+}

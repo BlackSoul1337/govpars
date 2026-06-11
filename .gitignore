@@ -1,0 +1,64 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.secrets/
+secrets/
+credentials*.json
+service-account*.json
+cookies*.json
+storage_state*.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+config/**/*.local.toml
+config/**/*.private.toml
+
+# Python and tooling
+.venv/
+.uv-cache/
+.uv-python/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Runtime state and generated data
+logs/
+exports/
+playwright/.auth/
+playwright/.cache/
+playwright/**/auth/
+*.log
+*.jsonl
+*.csv
+*.csv.tmp
+*.dump
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+*.bak
+
+# Untrusted/generated proxy inputs and outputs
+free-proxy-list.json
+proxies.json
+spys*.txt
+config/proxy_pools/*
+!config/proxy_pools/public_pool.example.json
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

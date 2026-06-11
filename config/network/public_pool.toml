@@ -1,0 +1,8 @@
+[network]
+kind = "static_proxy"
+proxy_pool_file = "proxy_pools/public_working.json"
+proxy_pool_index_env = "PROXY_POOL_INDEX"
+sticky_ttl_seconds = 7200
+max_lanes = 4
+cooldown_seconds = 600
+block_threshold = 3

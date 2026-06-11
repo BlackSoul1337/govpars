@@ -1,0 +1,192 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-procurement}
+      POSTGRES_USER: ${POSTGRES_USER:-procurement}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-procurement}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-procurement} -d ${POSTGRES_DB:-procurement}
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker-eep:
+    build: .
+    profiles: ["eep", "full", "workers"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-procurement}:${POSTGRES_PASSWORD:-procurement}@postgres:5432/${POSTGRES_DB:-procurement}
+      PROXY_URL: ${PROXY_URL:-}
+      PROXY_POOL_FILE: ${PROXY_POOL_FILE:-}
+      PROXY_POOL_INDEX: ${PROXY_POOL_INDEX:-0}
+      NETWORK_MAX_LANES: ${EEP_NETWORK_MAX_LANES:-4}
+      WORKER_COUNT: ${EEP_WORKER_COUNT:-}
+      PROXY_ROTATE_URL: ${PROXY_ROTATE_URL:-}
+      PROCUREMENT_CONFIG_DIR: /app/config
+      LOG_DIR: /app/logs
+      LOG_FILENAME: worker-eep.jsonl
+      METRICS_PORT: 9108
+    ports:
+      - "${EEP_METRICS_PORT:-9108}:9108"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - worker
+      - --source
+      - eep-mitwork
+      - --runtime
+      - ${EEP_RUNTIME_PROFILE:-server}
+      - --network
+      - ${EEP_NETWORK_PROFILE:-direct}
+      - --captcha
+      - disabled
+
+  worker-zakup:
+    build: .
+    profiles: ["zakup", "full", "workers"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-procurement}:${POSTGRES_PASSWORD:-procurement}@postgres:5432/${POSTGRES_DB:-procurement}
+      PROXY_URL: ${PROXY_URL:-}
+      PROXY_POOL_FILE: ${PROXY_POOL_FILE:-}
+      PROXY_POOL_INDEX: ${PROXY_POOL_INDEX:-0}
+      NETWORK_MAX_LANES: ${ZAKUP_NETWORK_MAX_LANES:-4}
+      WORKER_COUNT: ${ZAKUP_WORKER_COUNT:-}
+      BROWSER_LANES: ${ZAKUP_BROWSER_LANES:-}
+      PROXY_ROTATE_URL: ${PROXY_ROTATE_URL:-}
+      TWOCAPTCHA_API_KEY: ${TWOCAPTCHA_API_KEY:-}
+      PROCUREMENT_CONFIG_DIR: /app/config
+      LOG_DIR: /app/logs
+      LOG_FILENAME: worker-zakup.jsonl
+      METRICS_PORT: 9108
+      BROWSER_PROFILE_DIR: /app/playwright/worker/auth
+    ports:
+      - "${ZAKUP_METRICS_PORT:-9109}:9108"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - zakup_browser_data:/app/playwright
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    shm_size: "1gb"
+    command:
+      - worker
+      - --source
+      - zakup-sk
+      - --runtime
+      - ${ZAKUP_RUNTIME_PROFILE:-server}
+      - --network
+      - ${ZAKUP_NETWORK_PROFILE:-direct}
+      - --captcha
+      - ${CAPTCHA_PROFILE:-disabled}
+
+  scheduler-eep:
+    build: .
+    profiles: ["eep", "full", "workers"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-procurement}:${POSTGRES_PASSWORD:-procurement}@postgres:5432/${POSTGRES_DB:-procurement}
+      PROXY_URL: ${PROXY_URL:-}
+      PROXY_POOL_FILE: ${PROXY_POOL_FILE:-}
+      PROXY_POOL_INDEX: ${PROXY_POOL_INDEX:-0}
+      NETWORK_MAX_LANES: ${SCHEDULER_EEP_NETWORK_MAX_LANES:-1}
+      PROXY_ROTATE_URL: ${PROXY_ROTATE_URL:-}
+      PROCUREMENT_CONFIG_DIR: /app/config
+      LOG_DIR: /app/logs
+      LOG_FILENAME: scheduler-eep.jsonl
+      METRICS_PORT: 9108
+    ports:
+      - "${SCHEDULER_EEP_METRICS_PORT:-9110}:9108"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - scheduler
+      - --source
+      - eep-mitwork
+      - --runtime
+      - ${SCHEDULER_RUNTIME_PROFILE:-server}
+      - --network
+      - ${SCHEDULER_EEP_NETWORK_PROFILE:-direct}
+      - --captcha
+      - disabled
+
+  scheduler-zakup:
+    build: .
+    profiles: ["zakup", "full", "workers"]
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10m
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-procurement}:${POSTGRES_PASSWORD:-procurement}@postgres:5432/${POSTGRES_DB:-procurement}
+      PROXY_URL: ${PROXY_URL:-}
+      PROXY_POOL_FILE: ${PROXY_POOL_FILE:-}
+      PROXY_POOL_INDEX: ${PROXY_POOL_INDEX:-0}
+      NETWORK_MAX_LANES: ${SCHEDULER_ZAKUP_NETWORK_MAX_LANES:-1}
+      BROWSER_LANES: ${SCHEDULER_ZAKUP_BROWSER_LANES:-1}
+      PROXY_ROTATE_URL: ${PROXY_ROTATE_URL:-}
+      TWOCAPTCHA_API_KEY: ${TWOCAPTCHA_API_KEY:-}
+      PROCUREMENT_CONFIG_DIR: /app/config
+      LOG_DIR: /app/logs
+      LOG_FILENAME: scheduler-zakup.jsonl
+      METRICS_PORT: 9108
+      BROWSER_PROFILE_DIR: /app/playwright/scheduler/auth
+    ports:
+      - "${SCHEDULER_ZAKUP_METRICS_PORT:-9111}:9108"
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - zakup_browser_data:/app/playwright
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - scheduler
+      - --source
+      - zakup-sk
+      - --runtime
+      - ${SCHEDULER_RUNTIME_PROFILE:-server}
+      - --network
+      - ${SCHEDULER_ZAKUP_NETWORK_PROFILE:-direct}
+      - --captcha
+      - ${CAPTCHA_PROFILE:-disabled}
+
+  migrate:
+    build: .
+    profiles: ["eep", "zakup", "full", "workers"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-procurement}:${POSTGRES_PASSWORD:-procurement}@postgres:5432/${POSTGRES_DB:-procurement}
+      PROCUREMENT_CONFIG_DIR: /app/config
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/app/.venv/bin/alembic"]
+    command: ["upgrade", "head"]
+
+volumes:
+  postgres_data:
+  zakup_browser_data:

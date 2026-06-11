@@ -1,0 +1,6 @@
+[captcha]
+provider = "disabled"
+max_attempts = 0
+poll_interval_seconds = 5
+timeout_seconds = 120
+

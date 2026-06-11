@@ -1,0 +1,24 @@
+{
+  "proxies": [
+    {
+      "url": "http://proxy-1.example:8000",
+      "source": "replace-with-a-validated-pool"
+    },
+    {
+      "url": "http://proxy-2.example:8000",
+      "source": "replace-with-a-validated-pool"
+    },
+    {
+      "url": "http://proxy-3.example:8000",
+      "source": "replace-with-a-validated-pool"
+    },
+    {
+      "url": "http://proxy-4.example:8000",
+      "source": "replace-with-a-validated-pool"
+    },
+    {
+      "url": "http://proxy-5.example:8000",
+      "source": "replace-with-a-validated-pool"
+    }
+  ]
+}

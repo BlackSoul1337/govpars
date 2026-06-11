@@ -1,0 +1,12 @@
+[runtime]
+worker_count = 4
+claim_batch_size = 10
+lease_seconds = 180
+backfill_capacity_percent = 20
+browser_lanes = 2
+browser_navigation_timeout_seconds = 60
+browser_capture_timeout_seconds = 60
+browser_response_timeout_seconds = 60
+browser_disk_cache_mb = 512
+browser_preload_main_bundle = false
+metrics_sample_seconds = 15

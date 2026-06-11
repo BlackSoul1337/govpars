@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: procurement_test
+          POSTGRES_USER: procurement
+          POSTGRES_PASSWORD: procurement-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U procurement -d procurement_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://procurement:procurement-ci@127.0.0.1:5432/procurement_test
+      TEST_DATABASE_URL: postgresql+asyncpg://procurement:procurement-ci@127.0.0.1:5432/procurement_test
+      PROCUREMENT_CONFIG_DIR: config
+      PLAYWRIGHT_HEADLESS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check src tests migrations
+      - run: uv run alembic upgrade head
+      - run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+      - name: Validate clean and 0006-to-head migration paths
+        shell: bash
+        run: |
+          docker exec "${{ job.services.postgres.id }}" \
+            createdb -U procurement procurement_upgrade_test
+          DATABASE_URL=postgresql+asyncpg://procurement:procurement-ci@127.0.0.1:5432/procurement_upgrade_test \
+            uv run alembic upgrade 0006
+          DATABASE_URL=postgresql+asyncpg://procurement:procurement-ci@127.0.0.1:5432/procurement_upgrade_test \
+            uv run alembic upgrade head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --profile full config --quiet
+      - run: docker build --tag procurement-parser:ci .
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: procurement-parser:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv export --frozen --no-dev --format requirements-txt --output-file requirements-audit.txt
+      - run: uvx pip-audit --requirement requirements-audit.txt

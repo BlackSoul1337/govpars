@@ -1,0 +1,6 @@
+[captcha]
+provider = "manual"
+max_attempts = 2
+poll_interval_seconds = 5
+timeout_seconds = 300
+

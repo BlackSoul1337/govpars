@@ -1,0 +1,10 @@
+[app]
+log_level = "INFO"
+log_to_file = true
+log_dir = "logs"
+log_filename = "procurement-parser.jsonl"
+log_max_bytes = 10485760
+log_backup_count = 5
+revision_mode = "changes"
+metrics_port = 9108
+history_retention_days = 90

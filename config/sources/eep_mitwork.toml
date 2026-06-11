@@ -1,0 +1,16 @@
+[source]
+name = "eep-mitwork"
+base_url = "https://eep.mitwork.kz"
+request_timeout_seconds = 30
+per_page = 50
+max_attempts = 5
+active_refresh_seconds = 900
+list_refresh_seconds = 300
+closed_refresh_seconds = 86400
+old_refresh_seconds = 604800
+full_reconcile_seconds = 604800
+recently_closed_window_seconds = 1209600
+
+[source.concurrency]
+direct = 6
+proxy = 10
