@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+import orjson
 import structlog
 
 REDACTED_KEYS = {
@@ -18,6 +21,35 @@ REDACTED_KEYS = {
     "twocaptcha_api_key",
     "x-api-key",
 }
+
+
+class JsonLineFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        try:
+            payload = json.loads(message)
+        except (TypeError, ValueError):
+            payload = {
+                "event": message,
+                "level": record.levelname.lower(),
+                "logger": record.name,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+            if record.exc_info:
+                payload["exception"] = self.formatException(record.exc_info)
+            payload = _redact(None, record.levelname.lower(), payload)
+            return orjson.dumps(payload).decode("utf-8")
+        if isinstance(payload, dict):
+            payload = _redact(None, record.levelname.lower(), payload)
+            return orjson.dumps(payload).decode("utf-8")
+        return orjson.dumps(
+            {
+                "event": payload,
+                "level": record.levelname.lower(),
+                "logger": record.name,
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        ).decode("utf-8")
 
 
 def _redact_value(key: str, value: Any) -> Any:
@@ -49,7 +81,7 @@ def configure_logging(
     log_backup_count: int = 5,
 ) -> None:
     numeric_level = getattr(logging, level.upper(), logging.INFO)
-    formatter = logging.Formatter("%(message)s")
+    formatter = JsonLineFormatter()
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_to_file:
         directory = Path(log_dir)
