@@ -54,6 +54,20 @@ Organizations are not automatically merged across sources by BIN.
 
 ## Source Strategies
 
+EEP discovery uses windowed `asyncio` parallelism. `lots`, `buys`, and `points`
+run concurrently but share one source-level semaphore. A page task performs
+HTTP fetch and parsing only. After
+`asyncio.gather(..., return_exceptions=True)`, results are classified from left
+to right; one persistence lock then serializes enqueue and checkpoint writes
+across catalogs. Increasing network concurrency therefore does not multiply
+concurrent database transactions.
+
+An empty page is a successful terminal result. Data and failures after the
+first empty page are speculative and do not affect the checkpoint. A failure
+before the terminal page rejects the complete window. If enqueue succeeds but
+the separate checkpoint write fails, UPSERT makes replay safe. Zakup discovery
+remains sequential to preserve session and lane affinity.
+
 EEP:
 
 ```text

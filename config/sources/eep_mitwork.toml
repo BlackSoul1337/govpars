@@ -14,3 +14,7 @@ recently_closed_window_seconds = 1209600
 [source.concurrency]
 direct = 6
 proxy = 10
+
+[source.discovery]
+direct = 6
+proxy = 10

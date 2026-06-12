@@ -36,6 +36,11 @@ class SourceConcurrency(BaseModel):
     proxy: int = 8
 
 
+class SourceDiscovery(BaseModel):
+    direct: int = Field(default=1, ge=1, le=64)
+    proxy: int = Field(default=1, ge=1, le=64)
+
+
 class SourceEndpoints(BaseModel):
     lots: str = ""
     adverts: str = ""
@@ -56,6 +61,7 @@ class SourceSettings(BaseModel):
     recently_closed_window_seconds: int = 1209600
     browser_profile_dir: str | None = None
     concurrency: SourceConcurrency = Field(default_factory=SourceConcurrency)
+    discovery: SourceDiscovery = Field(default_factory=SourceDiscovery)
     endpoints: SourceEndpoints = Field(default_factory=SourceEndpoints)
 
 
@@ -222,6 +228,7 @@ def load_settings(
         source_data.get("browser_profile_dir"),
     )
     source_data["concurrency"] = source_doc.get("source", {}).get("concurrency", {})
+    source_data["discovery"] = source_doc.get("source", {}).get("discovery", {})
     source_data["endpoints"] = source_doc.get("source", {}).get("endpoints", {})
 
     return Settings(
@@ -233,3 +240,35 @@ def load_settings(
         runtime=RuntimeSettings.model_validate(runtime_data),
         config_dir=root,
     )
+
+
+def discovery_concurrency(
+    settings: Settings,
+    override: int | None = None,
+) -> int:
+    if settings.source.name != Source.EEP_MITWORK.value:
+        return 1
+    if override is not None:
+        if not 1 <= override <= 64:
+            raise ValueError("discovery concurrency must be between 1 and 64")
+        return override
+    if settings.network.kind == "direct":
+        return settings.source.discovery.direct
+    return settings.source.discovery.proxy
+
+
+def configure_discovery_concurrency(
+    settings: Settings,
+    override: int | None = None,
+) -> int:
+    effective = discovery_concurrency(settings, override)
+    if settings.source.name == Source.EEP_MITWORK.value:
+        settings.source.concurrency.direct = max(
+            settings.source.concurrency.direct,
+            effective,
+        )
+        settings.source.concurrency.proxy = max(
+            settings.source.concurrency.proxy,
+            effective,
+        )
+    return effective

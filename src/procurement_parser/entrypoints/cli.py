@@ -18,7 +18,11 @@ from procurement_parser.application.csv_validator import (
 from procurement_parser.application.factory import build_context
 from procurement_parser.application.pipeline import DiscoveryService, WorkerService
 from procurement_parser.application.scheduler import run_scheduler
-from procurement_parser.config.settings import load_settings
+from procurement_parser.config.settings import (
+    configure_discovery_concurrency,
+    discovery_concurrency,
+    load_settings,
+)
 from procurement_parser.domain.models import EntityType, Source
 from procurement_parser.infrastructure.captcha.solvers import build_captcha_solver
 from procurement_parser.infrastructure.network.proxy_pool import (
@@ -86,6 +90,28 @@ def _sources(value: str) -> list[Source]:
     if value == "all":
         return [Source.EEP_MITWORK, Source.ZAKUP_SK]
     return [_source(value)]
+
+
+async def _run_discovery_catalogs(
+    service: DiscoveryService,
+    source: Source,
+    entity_types: list[EntityType] | tuple[EntityType, ...],
+    **run_kwargs,
+) -> int:
+    if source == Source.ZAKUP_SK:
+        total = 0
+        for entity_type in entity_types:
+            total += await service.run(entity_type, **run_kwargs)
+        return total
+
+    results = await asyncio.gather(
+        *(service.run(entity_type, **run_kwargs) for entity_type in entity_types),
+        return_exceptions=True,
+    )
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures:
+        raise failures[0]
+    return sum(result for result in results if isinstance(result, int))
 
 
 def _network_for_source(
@@ -494,6 +520,15 @@ def discover(
     zakup_network: Annotated[str | None, typer.Option()] = None,
     captcha: Annotated[str, typer.Option()] = "disabled",
     resume: Annotated[bool, typer.Option()] = True,
+    discovery_concurrency_override: Annotated[
+        int | None,
+        typer.Option(
+            "--discovery-concurrency",
+            min=1,
+            max=64,
+            help="EEP list request concurrency; Zakup always remains sequential.",
+        ),
+    ] = None,
 ) -> None:
     async def execute() -> None:
         contexts = []
@@ -526,6 +561,20 @@ def discover(
                     current_network,
                     current_captcha,
                 )
+                current_discovery_concurrency = configure_discovery_concurrency(
+                    settings,
+                    discovery_concurrency_override,
+                )
+                selected_entity_types = _entity_types(
+                    entity_type,
+                    current_source,
+                )
+                typer.echo(
+                    f"{current_source.value}: discovery starting "
+                    f"(types={','.join(value.value for value in selected_entity_types)}, "
+                    f"pages={'until exhausted' if pages == 0 else pages}, "
+                    f"concurrency={current_discovery_concurrency})"
+                )
                 context = build_context(settings)
                 contexts.append(context)
 
@@ -533,22 +582,25 @@ def discover(
                     *,
                     current_context=context,
                     current_source=current_source,
+                    current_discovery_concurrency=current_discovery_concurrency,
+                    current_entity_types=tuple(selected_entity_types),
                 ) -> tuple[Source, int]:
                     service = DiscoveryService(
                         current_context.adapter,
                         current_context.frontier,
+                        concurrency=current_discovery_concurrency,
                     )
-                    total = 0
-                    for current_type in _entity_types(entity_type, current_source):
-                        total += await service.run(
-                            current_type,
-                            start_page=start_page,
-                            max_pages=pages or None,
-                            priority=priority,
-                            filters=filters,
-                            scope=scope,
-                            resume=resume,
-                        )
+                    total = await _run_discovery_catalogs(
+                        service,
+                        current_source,
+                        current_entity_types,
+                        start_page=start_page,
+                        max_pages=pages or None,
+                        priority=priority,
+                        filters=filters,
+                        scope=scope,
+                        resume=resume,
+                    )
                     return current_source, total
 
                 jobs.append(run_source())
@@ -698,6 +750,15 @@ def run(
     pages: Annotated[int, typer.Option(help="0 means until exhausted")] = 0,
     drain: Annotated[bool, typer.Option()] = False,
     idle_grace_seconds: Annotated[int, typer.Option(min=0)] = 5,
+    discovery_concurrency_override: Annotated[
+        int | None,
+        typer.Option(
+            "--discovery-concurrency",
+            min=1,
+            max=64,
+            help="EEP list request concurrency; Zakup always remains sequential.",
+        ),
+    ] = None,
 ) -> None:
     async def execute() -> None:
         contexts = []
@@ -724,6 +785,10 @@ def run(
                     current_network,
                     current_captcha,
                 )
+                current_discovery_concurrency = configure_discovery_concurrency(
+                    settings,
+                    discovery_concurrency_override,
+                )
                 if not contexts:
                     start_metrics_server(settings.app.metrics_port)
                 context = build_context(settings)
@@ -731,14 +796,19 @@ def run(
                 discovery = DiscoveryService(
                     context.adapter,
                     context.frontier,
+                    concurrency=current_discovery_concurrency,
                 )
-                source_discovery_jobs = [
-                    discovery.run(
-                        entity_type,
+                async def run_source_discovery(
+                    *,
+                    current_discovery=discovery,
+                    current_source=current_source,
+                ) -> int:
+                    return await _run_discovery_catalogs(
+                        current_discovery,
+                        current_source,
+                        _entity_types("all", current_source),
                         max_pages=pages or None,
                     )
-                    for entity_type in _entity_types("all", current_source)
-                ]
                 current_worker = WorkerService(
                     adapter=context.adapter,
                     frontier=context.frontier,
@@ -756,7 +826,7 @@ def run(
                 pipelines.append(
                     (
                         current_source,
-                        source_discovery_jobs,
+                        run_source_discovery,
                         current_worker,
                     )
                 )
@@ -779,12 +849,12 @@ def run(
             try:
                 async def run_pipeline(
                     current_source: Source,
-                    current_discovery_jobs,
+                    current_discovery_job,
                     current_worker: WorkerService,
                 ) -> list[BaseException]:
                     if drain:
                         discovery_results = await asyncio.gather(
-                            *current_discovery_jobs,
+                            current_discovery_job(),
                             return_exceptions=True,
                         )
                         failures = [
@@ -804,7 +874,7 @@ def run(
                             if isinstance(result, BaseException)
                         ]
                     results = await asyncio.gather(
-                        *current_discovery_jobs,
+                        current_discovery_job(),
                         current_worker.run(),
                         return_exceptions=True,
                     )
@@ -1053,7 +1123,11 @@ def catalog_stats(
                         )
                     )
                     entity_types = (
-                        [EntityType.LOT, EntityType.PLAN_ITEM]
+                        [
+                            EntityType.LOT,
+                            EntityType.NOTICE,
+                            EntityType.PLAN_ITEM,
+                        ]
                         if current_source == Source.EEP_MITWORK
                         else [EntityType.LOT, EntityType.NOTICE]
                     )
@@ -1068,6 +1142,7 @@ def catalog_stats(
                                     adapter.probe_catalog(
                                         current_type,
                                         samples=samples,
+                                        concurrency=discovery_concurrency(settings),
                                     ),
                                     label=catalog_label,
                                     enabled=progress,
@@ -1088,9 +1163,23 @@ def catalog_stats(
                             identities = probe.pop("sample_identities")
                             elapsed = probe["elapsed_seconds"]
                             rate = probe["returned"] / elapsed if elapsed else None
+                            sequential_elapsed = probe.get(
+                                "sequential_elapsed_seconds",
+                                elapsed,
+                            )
+                            sequential_rate = (
+                                probe["returned"] / sequential_elapsed
+                                if sequential_elapsed
+                                else None
+                            )
                             estimated = (
                                 probe["total"] / rate
                                 if probe["total"] is not None and rate
+                                else None
+                            )
+                            sequential_estimated = (
+                                probe["total"] / sequential_rate
+                                if probe["total"] is not None and sequential_rate
                                 else None
                             )
                             detail_result = (
@@ -1136,6 +1225,9 @@ def catalog_stats(
                                         "browser_timeout_seconds": (
                                             settings.runtime.browser_response_timeout_seconds
                                         ),
+                                        "discovery_concurrency": (
+                                            discovery_concurrency(settings)
+                                        ),
                                     },
                                     "network_settings": {
                                         "kind": settings.network.kind,
@@ -1153,6 +1245,16 @@ def catalog_stats(
                                     "estimated_discovery_seconds": (
                                         round(estimated, 1)
                                         if estimated is not None
+                                        else None
+                                    ),
+                                    "sequential_list_items_per_second": (
+                                        round(sequential_rate, 2)
+                                        if sequential_rate
+                                        else None
+                                    ),
+                                    "estimated_discovery_seconds_sequential": (
+                                        round(sequential_estimated, 1)
+                                        if sequential_estimated is not None
                                         else None
                                     ),
                                     "worker_probe": detail_result,
@@ -1328,6 +1430,15 @@ def scheduler(
     eep_network: Annotated[str, typer.Option()] = "direct",
     zakup_network: Annotated[str, typer.Option()] = "direct",
     captcha: Annotated[str, typer.Option()] = "disabled",
+    discovery_concurrency_override: Annotated[
+        int | None,
+        typer.Option(
+            "--discovery-concurrency",
+            min=1,
+            max=64,
+            help="EEP list request concurrency; Zakup always remains sequential.",
+        ),
+    ] = None,
 ) -> None:
     if network:
         eep_network = network
@@ -1385,6 +1496,9 @@ def scheduler(
                             zakup_network=zakup_network,
                         ),
                         captcha_profile=captcha,
+                        discovery_concurrency_override=(
+                            discovery_concurrency_override
+                        ),
                         stop_event=stop_event,
                     )
                     for current_source in selected_sources

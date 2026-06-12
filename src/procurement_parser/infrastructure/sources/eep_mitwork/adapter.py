@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 
@@ -69,25 +70,53 @@ class EepMitworkAdapter:
         entity_type: EntityType,
         *,
         samples: int = 1,
+        concurrency: int = 1,
     ) -> dict:
         if entity_type not in LIST_PATHS:
             raise ValueError(f"Unsupported EEP catalog: {entity_type.value}")
+        configured_concurrency = max(1, concurrency)
+        effective_concurrency = min(configured_concurrency, samples)
+        semaphore = asyncio.Semaphore(effective_concurrency)
+
+        async def fetch_page(page: int):
+            async with semaphore:
+                page_started = time.monotonic()
+                response = await self.client.get(
+                    LIST_PATHS[entity_type],
+                    params={"page": page, "per-page": self.settings.per_page},
+                )
+                discovered = parse_list(response.text, entity_type, priority=0)
+                return response, discovered, time.monotonic() - page_started
+
         started = time.monotonic()
         returned = 0
         total = None
         strategy = None
         sample_identities = []
-        for page in range(1, samples + 1):
-            response = await self.client.get(
-                LIST_PATHS[entity_type],
-                params={"page": page, "per-page": self.settings.per_page},
-            )
+        sequential_elapsed = 0.0
+        terminal_page = None
+        ignored_speculative_failures = 0
+        results = await asyncio.gather(
+            *(fetch_page(page) for page in range(1, samples + 1)),
+            return_exceptions=True,
+        )
+        for page, result in enumerate(results, start=1):
+            if terminal_page is not None:
+                if isinstance(result, BaseException):
+                    ignored_speculative_failures += 1
+                continue
+            if isinstance(result, BaseException):
+                raise result
+            response, discovered, request_elapsed = result
+            sequential_elapsed += request_elapsed
             strategy = response.strategy
-            discovered = parse_list(response.text, entity_type, priority=0)
-            returned += len(discovered)
-            sample_identities.extend(item.identity for item in discovered)
             if total is None:
                 total = self._catalog_total(response.text)
+            if not discovered:
+                terminal_page = page
+                continue
+            returned += len(discovered)
+            sample_identities.extend(item.identity for item in discovered)
         elapsed = time.monotonic() - started
         return {
             "total": total,
@@ -95,6 +124,11 @@ class EepMitworkAdapter:
             "samples": samples,
             "page_size": self.settings.per_page,
             "elapsed_seconds": elapsed,
+            "sequential_elapsed_seconds": sequential_elapsed,
+            "configured_concurrency": configured_concurrency,
+            "effective_concurrency": effective_concurrency,
+            "terminal_page": terminal_page,
+            "ignored_speculative_failures": ignored_speculative_failures,
             "strategy": strategy,
             "sample_identities": sample_identities,
         }

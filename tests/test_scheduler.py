@@ -65,6 +65,9 @@ class FakeMaintenance:
 )
 async def test_scheduler_executes_each_policy(monkeypatch, job_name) -> None:
     source_settings = SimpleNamespace(
+        name="eep-mitwork",
+        discovery=SimpleNamespace(direct=6, proxy=10),
+        concurrency=SimpleNamespace(direct=6, proxy=10),
         list_refresh_seconds=300,
         active_refresh_seconds=900,
         closed_refresh_seconds=86400,
@@ -72,7 +75,10 @@ async def test_scheduler_executes_each_policy(monkeypatch, job_name) -> None:
         full_reconcile_seconds=604800,
         recently_closed_window_seconds=1209600,
     )
-    settings = SimpleNamespace(source=source_settings)
+    settings = SimpleNamespace(
+        source=source_settings,
+        network=SimpleNamespace(kind="direct"),
+    )
     context = FakeContext(Source.EEP_MITWORK)
     monkeypatch.setattr(scheduler, "load_settings", lambda **_kwargs: settings)
     monkeypatch.setattr(scheduler, "build_context", lambda _settings: context)

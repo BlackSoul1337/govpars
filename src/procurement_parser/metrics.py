@@ -12,6 +12,41 @@ DISCOVERED_ENTITIES = Counter(
     "Entities discovered from source lists",
     ["source", "entity_type"],
 )
+DISCOVERY_WINDOW_DURATION = Histogram(
+    "procurement_discovery_window_duration_seconds",
+    "Discovery window wall-clock duration including persistence",
+    ["source", "entity_type", "outcome"],
+)
+DISCOVERY_PAGES = Counter(
+    "procurement_discovery_pages_total",
+    "Discovery pages classified by window outcome",
+    ["source", "entity_type", "kind"],
+)
+DISCOVERY_WINDOWS = Counter(
+    "procurement_discovery_windows_total",
+    "Discovery window outcomes",
+    ["source", "entity_type", "outcome"],
+)
+DISCOVERY_ENTITY_RATE = Histogram(
+    "procurement_discovery_entities_per_second",
+    "Entities discovered per second for successful windows",
+    ["source", "entity_type"],
+)
+DISCOVERY_ACTIVE_REQUESTS = Gauge(
+    "procurement_discovery_active_requests",
+    "Active source list requests",
+    ["source", "entity_type"],
+)
+DISCOVERY_CONFIGURED_CONCURRENCY = Gauge(
+    "procurement_discovery_configured_concurrency",
+    "Configured source-level discovery concurrency",
+    ["source"],
+)
+DISCOVERY_EFFECTIVE_CONCURRENCY = Gauge(
+    "procurement_discovery_effective_concurrency",
+    "Pages requested in the current discovery window",
+    ["source", "entity_type"],
+)
 TASK_OUTCOMES = Counter(
     "procurement_task_outcomes_total",
     "Worker task outcomes",

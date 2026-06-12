@@ -102,6 +102,21 @@ Discovery:
 4. ставит detail task в `crawl_frontier`;
 5. обновляет checkpoint.
 
+Для EEP orchestration использует оконную `asyncio`-параллельность. `lots`,
+`buys` и `points` запускаются одновременно, но используют один semaphore на
+источник. Page-task выполняет только HTTP fetch и parse. После
+`asyncio.gather(..., return_exceptions=True)` результаты классифицируются
+слева направо; затем один persistence lock сериализует enqueue и checkpoint
+между каталогами. Поэтому рост сетевой параллельности не увеличивает число
+одновременных DB transactions.
+
+Пустая страница является успешным terminal result. Все результаты после первой
+пустой страницы спекулятивны: их данные и ошибки не влияют на checkpoint.
+Ошибка до terminal page отклоняет окно целиком. Enqueue может успешно
+завершиться до отдельной ошибки checkpoint; повтор окна безопасен благодаря
+UPSERT. Zakup сохраняет последовательный discovery, чтобы не нарушать
+session/lane affinity.
+
 Worker:
 
 1. claims batch через `SKIP LOCKED`;

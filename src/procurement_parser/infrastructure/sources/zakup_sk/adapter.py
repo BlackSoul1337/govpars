@@ -544,7 +544,9 @@ class ZakupSkAdapter:
         entity_type: EntityType,
         *,
         samples: int = 1,
+        concurrency: int = 1,
     ) -> dict:
+        del concurrency
         if entity_type not in {EntityType.LOT, EntityType.NOTICE}:
             raise ValueError(f"Unsupported Zakup catalog: {entity_type.value}")
         endpoint = self._endpoint(entity_type)
@@ -580,6 +582,9 @@ class ZakupSkAdapter:
             "samples": samples,
             "page_size": self.settings.per_page,
             "elapsed_seconds": elapsed,
+            "sequential_elapsed_seconds": elapsed,
+            "configured_concurrency": 1,
+            "effective_concurrency": 1,
             "strategy": strategy,
             "sample_identities": sample_identities,
         }
