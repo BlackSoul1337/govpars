@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from procurement_parser.config.settings import load_settings
+from procurement_parser.config.settings import (
+    configure_discovery_concurrency,
+    discovery_concurrency,
+    load_settings,
+)
 from procurement_parser.domain.models import Source
 
 
@@ -98,3 +102,39 @@ def test_public_pool_loads_all_validated_proxies(monkeypatch, tmp_path) -> None:
 
     assert len(settings.network.proxy_pool_urls) > 1
     assert settings.network.proxy_url == settings.network.proxy_pool_urls[1]
+
+
+def test_eep_discovery_concurrency_uses_network_profile() -> None:
+    direct = load_settings(
+        source=Source.EEP_MITWORK,
+        runtime_profile="local",
+        network_profile="direct",
+        captcha_profile="disabled",
+        config_dir=Path("config"),
+    )
+    proxy = load_settings(
+        source=Source.EEP_MITWORK,
+        runtime_profile="local",
+        network_profile="static_proxy",
+        captcha_profile="disabled",
+        config_dir=Path("config"),
+    )
+
+    assert discovery_concurrency(direct) == 6
+    assert discovery_concurrency(proxy) == 10
+    assert discovery_concurrency(direct, 3) == 3
+    assert configure_discovery_concurrency(direct, 64) == 64
+    assert direct.source.concurrency.direct == 64
+
+
+def test_zakup_discovery_is_always_sequential() -> None:
+    settings = load_settings(
+        source=Source.ZAKUP_SK,
+        runtime_profile="local",
+        network_profile="direct",
+        captcha_profile="disabled",
+        config_dir=Path("config"),
+    )
+
+    assert discovery_concurrency(settings) == 1
+    assert discovery_concurrency(settings, 64) == 1

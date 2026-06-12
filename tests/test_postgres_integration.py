@@ -6,6 +6,7 @@ import orjson
 import pytest
 from sqlalchemy import make_url, text
 
+from procurement_parser.application.pipeline import DiscoveryService
 from procurement_parser.config.settings import DatabaseSettings
 from procurement_parser.domain.models import (
     DiscoveredEntity,
@@ -21,6 +22,34 @@ from procurement_parser.infrastructure.persistence.postgres.repositories import 
 from procurement_parser.infrastructure.sources.eep_mitwork.parser import parse_detail
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class IntegrationDiscoveryAdapter:
+    source = Source.EEP_MITWORK
+
+    def __init__(self, prefix: str, *, fail_page: int | None = None) -> None:
+        self.prefix = prefix
+        self.fail_page = fail_page
+
+    async def discover(self, entity_type, *, page, priority, filters):
+        del filters
+        if page == self.fail_page:
+            raise TimeoutError(f"integration page {page}")
+        if page == 13:
+            return []
+        if page == 15:
+            raise TimeoutError("ignored speculative tail")
+        return [
+            DiscoveredEntity(
+                identity=EntityIdentity(
+                    source=self.source,
+                    entity_type=entity_type,
+                    source_entity_id=f"{self.prefix}-{page}",
+                    canonical_url=f"https://example.test/{self.prefix}/{page}",
+                ),
+                priority=priority,
+            )
+        ]
 
 
 @pytest.mark.asyncio
@@ -56,7 +85,12 @@ async def test_postgres_queue_upsert_and_revision_cycle() -> None:
                 )
             )
 
-        assert await frontier.enqueue([DiscoveredEntity(identity=identity)]) == 1
+        assert (
+            await frontier.enqueue(
+                [DiscoveredEntity(identity=identity, priority=10_000)]
+            )
+            == 1
+        )
         tasks = await frontier.claim(
             "integration-worker",
             source=Source.EEP_MITWORK,
@@ -138,5 +172,149 @@ async def test_postgres_queue_upsert_and_revision_cycle() -> None:
                       AND source_entity_id = 'integration-651383'
                     """
                 )
+            )
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.getenv("TEST_DATABASE_URL"),
+    reason="TEST_DATABASE_URL is required for PostgreSQL integration tests",
+)
+async def test_parallel_discovery_matches_sequential_and_is_atomic() -> None:
+    database_url = os.environ["TEST_DATABASE_URL"]
+    database_name = make_url(database_url).database or ""
+    if not database_name.endswith("_test"):
+        pytest.fail("TEST_DATABASE_URL must point to a dedicated *_test database")
+
+    database = Database(DatabaseSettings(url=database_url))
+    frontier = PostgresFrontierRepository(database)
+    prefix = "discovery-integration"
+    failed_prefix = "discovery-failed-integration"
+    scopes = ("integration-sequential", "integration-parallel", "integration-failed")
+    try:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    DELETE FROM discovery_checkpoints
+                    WHERE scope = ANY(:scopes)
+                    """
+                ),
+                {"scopes": list(scopes)},
+            )
+            await connection.execute(
+                text(
+                    """
+                    DELETE FROM source_entities
+                    WHERE source = 'eep-mitwork'
+                      AND (
+                        source_entity_id LIKE :prefix
+                        OR source_entity_id LIKE :failed_prefix
+                      )
+                    """
+                ),
+                {
+                    "prefix": f"{prefix}-%",
+                    "failed_prefix": f"{failed_prefix}-%",
+                },
+            )
+
+        sequential = DiscoveryService(
+            IntegrationDiscoveryAdapter(prefix),
+            frontier,
+            concurrency=1,
+        )
+        parallel = DiscoveryService(
+            IntegrationDiscoveryAdapter(prefix),
+            frontier,
+            concurrency=6,
+        )
+        assert (
+            await sequential.run(EntityType.LOT, scope=scopes[0], resume=False)
+            == 12
+        )
+        assert (
+            await parallel.run(EntityType.LOT, scope=scopes[1], resume=False)
+            == 12
+        )
+
+        failed = DiscoveryService(
+            IntegrationDiscoveryAdapter(failed_prefix, fail_page=2),
+            frontier,
+            concurrency=6,
+        )
+        with pytest.raises(TimeoutError):
+            await failed.run(
+                EntityType.LOT,
+                max_pages=6,
+                scope=scopes[2],
+                resume=False,
+            )
+
+        async with database.sessions() as session:
+            identity_count = await session.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM source_entities
+                    WHERE source = 'eep-mitwork'
+                      AND source_entity_id LIKE :prefix
+                    """
+                ),
+                {"prefix": f"{prefix}-%"},
+            )
+            failed_count = await session.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM source_entities
+                    WHERE source = 'eep-mitwork'
+                      AND source_entity_id LIKE :prefix
+                    """
+                ),
+                {"prefix": f"{failed_prefix}-%"},
+            )
+            checkpoints = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT scope, next_page, completed
+                        FROM discovery_checkpoints
+                        WHERE scope = ANY(:scopes)
+                        ORDER BY scope
+                        """
+                    ),
+                    {"scopes": list(scopes)},
+                )
+            ).all()
+
+        assert identity_count == 12
+        assert failed_count == 0
+        assert checkpoints == [
+            ("integration-parallel", 13, True),
+            ("integration-sequential", 13, True),
+        ]
+    finally:
+        async with database.engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM discovery_checkpoints WHERE scope = ANY(:scopes)"),
+                {"scopes": list(scopes)},
+            )
+            await connection.execute(
+                text(
+                    """
+                    DELETE FROM source_entities
+                    WHERE source = 'eep-mitwork'
+                      AND (
+                        source_entity_id LIKE :prefix
+                        OR source_entity_id LIKE :failed_prefix
+                      )
+                    """
+                ),
+                {
+                    "prefix": f"{prefix}-%",
+                    "failed_prefix": f"{failed_prefix}-%",
+                },
             )
         await database.close()

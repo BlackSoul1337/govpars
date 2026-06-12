@@ -5,6 +5,7 @@ import math
 import time
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import structlog
 
@@ -12,21 +13,165 @@ from procurement_parser.domain.errors import (
     RetriableSourceError,
     is_permanent_http_status,
 )
-from procurement_parser.domain.models import EntityEnvelope, EntityType, FrontierTask
+from procurement_parser.domain.models import (
+    DiscoveredEntity,
+    EntityEnvelope,
+    EntityType,
+    FrontierTask,
+)
 from procurement_parser.domain.ports import EntityRepository, FrontierPort, SourceAdapter
 from procurement_parser.metrics import (
     DISCOVERED_ENTITIES,
+    DISCOVERY_ACTIVE_REQUESTS,
+    DISCOVERY_CONFIGURED_CONCURRENCY,
+    DISCOVERY_EFFECTIVE_CONCURRENCY,
+    DISCOVERY_ENTITY_RATE,
+    DISCOVERY_PAGES,
+    DISCOVERY_WINDOW_DURATION,
+    DISCOVERY_WINDOWS,
     TASK_DURATION,
     TASK_OUTCOMES,
 )
 
 logger = structlog.get_logger()
+DISCOVERY_PROGRESS_INTERVAL_SECONDS = 5
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryPageSuccess:
+    page: int
+    items: list[DiscoveredEntity]
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryWindowAnalysis:
+    meaningful_pages: tuple[DiscoveryPageSuccess, ...]
+    terminal_page: int | None
+    speculative_empty_pages: int
+    ignored_speculative_failures: int
+    failed_page: int | None = None
+    failure: BaseException | None = None
+
+
+def classify_discovery_window(
+    pages: Sequence[int],
+    results: Sequence[list[DiscoveredEntity] | BaseException],
+) -> DiscoveryWindowAnalysis:
+    meaningful: list[DiscoveryPageSuccess] = []
+    terminal_page: int | None = None
+    speculative_empty_pages = 0
+    ignored_failures = 0
+
+    for page, result in zip(pages, results, strict=True):
+        if terminal_page is not None:
+            if isinstance(result, BaseException):
+                ignored_failures += 1
+            elif not result:
+                speculative_empty_pages += 1
+            continue
+        if isinstance(result, BaseException):
+            return DiscoveryWindowAnalysis(
+                meaningful_pages=tuple(meaningful),
+                terminal_page=None,
+                speculative_empty_pages=0,
+                ignored_speculative_failures=0,
+                failed_page=page,
+                failure=result,
+            )
+        if not result:
+            terminal_page = page
+            continue
+        meaningful.append(DiscoveryPageSuccess(page=page, items=result))
+
+    return DiscoveryWindowAnalysis(
+        meaningful_pages=tuple(meaningful),
+        terminal_page=terminal_page,
+        speculative_empty_pages=speculative_empty_pages,
+        ignored_speculative_failures=ignored_failures,
+    )
 
 
 class DiscoveryService:
-    def __init__(self, adapter: SourceAdapter, frontier: FrontierPort) -> None:
+    def __init__(
+        self,
+        adapter: SourceAdapter,
+        frontier: FrontierPort,
+        *,
+        concurrency: int = 1,
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> None:
+        if not 1 <= concurrency <= 64:
+            raise ValueError("discovery concurrency must be between 1 and 64")
         self.adapter = adapter
         self.frontier = frontier
+        self.concurrency = concurrency
+        self.semaphore = semaphore or asyncio.Semaphore(concurrency)
+        self._persistence_lock = asyncio.Lock()
+        DISCOVERY_CONFIGURED_CONCURRENCY.labels(
+            source=self.adapter.source.value,
+        ).set(concurrency)
+
+    async def _fetch_page(
+        self,
+        entity_type: EntityType,
+        *,
+        page: int,
+        priority: int,
+        filters: dict | None,
+    ) -> list[DiscoveredEntity]:
+        async with self.semaphore:
+            metric = DISCOVERY_ACTIVE_REQUESTS.labels(
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+            )
+            metric.inc()
+            try:
+                return await self.adapter.discover(
+                    entity_type,
+                    page=page,
+                    priority=priority,
+                    filters=filters,
+                )
+            finally:
+                metric.dec()
+
+    async def _gather_window(
+        self,
+        page_tasks: Sequence[asyncio.Task],
+        *,
+        entity_type: EntityType,
+        pages: Sequence[int],
+        started: float,
+    ) -> list[list[DiscoveredEntity] | BaseException]:
+        gather_future = asyncio.gather(
+            *page_tasks,
+            return_exceptions=True,
+        )
+        try:
+            while True:
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.shield(gather_future),
+                        timeout=DISCOVERY_PROGRESS_INTERVAL_SECONDS,
+                    )
+                except TimeoutError:
+                    completed = sum(task.done() for task in page_tasks)
+                    logger.info(
+                        "discovery_window_progress",
+                        source=self.adapter.source.value,
+                        entity_type=entity_type.value,
+                        first_page=pages[0],
+                        last_page=pages[-1],
+                        completed_pages=completed,
+                        pending_pages=len(page_tasks) - completed,
+                        elapsed_seconds=round(time.monotonic() - started, 3),
+                        effective_concurrency=len(pages),
+                    )
+        except asyncio.CancelledError:
+            for task in page_tasks:
+                task.cancel()
+            await asyncio.gather(*page_tasks, return_exceptions=True)
+            raise
 
     async def run(
         self,
@@ -47,7 +192,7 @@ class DiscoveryService:
                 entity_type,
                 scope=scope,
             )
-            if completed and scope == "all":
+            if completed:
                 return 0
         else:
             page = start_page or 1
@@ -55,45 +200,187 @@ class DiscoveryService:
         discovered_total = 0
         pages_processed = 0
         while max_pages is None or pages_processed < max_pages:
-            items = await self.adapter.discover(
-                entity_type,
-                page=page,
-                priority=priority,
-                filters=filters,
+            remaining = (
+                self.concurrency
+                if max_pages is None
+                else min(self.concurrency, max_pages - pages_processed)
             )
-            if not items:
-                if set_checkpoint:
-                    await set_checkpoint(
-                        self.adapter.source,
+            pages = tuple(range(page, page + remaining))
+            started = time.monotonic()
+            DISCOVERY_EFFECTIVE_CONCURRENCY.labels(
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+            ).set(len(pages))
+            DISCOVERY_PAGES.labels(
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+                kind="requested",
+            ).inc(len(pages))
+            logger.info(
+                "discovery_window_started",
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+                first_page=pages[0],
+                last_page=pages[-1],
+                requested_pages=len(pages),
+                effective_concurrency=len(pages),
+            )
+            page_tasks = [
+                asyncio.create_task(
+                    self._fetch_page(
                         entity_type,
-                        next_page=page,
-                        completed=True,
-                        scope=scope,
-                    )
-                break
-            discovered_total += await self.frontier.enqueue(items)
+                        page=current_page,
+                        priority=priority,
+                        filters=filters,
+                    ),
+                    name=(
+                        f"discovery-{self.adapter.source.value}-"
+                        f"{entity_type.value}-{current_page}"
+                    ),
+                )
+                    for current_page in pages
+            ]
+            results = await self._gather_window(
+                page_tasks,
+                entity_type=entity_type,
+                pages=pages,
+                started=started,
+            )
+            analysis = classify_discovery_window(pages, results)
+            if analysis.failure is not None:
+                elapsed = time.monotonic() - started
+                DISCOVERY_WINDOWS.labels(
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    outcome="failed",
+                ).inc()
+                DISCOVERY_WINDOW_DURATION.labels(
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    outcome="failed",
+                ).observe(elapsed)
+                logger.error(
+                    "discovery_window_failed",
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    first_page=pages[0],
+                    last_page=pages[-1],
+                    failed_page=analysis.failed_page,
+                    error_type=type(analysis.failure).__name__,
+                    elapsed_seconds=round(elapsed, 6),
+                    effective_concurrency=len(pages),
+                )
+                raise analysis.failure
+
+            items = [
+                item
+                for page_result in analysis.meaningful_pages
+                for item in page_result.items
+            ]
+            next_page = (
+                analysis.terminal_page
+                if analysis.terminal_page is not None
+                else pages[-1] + 1
+            )
+            try:
+                async with self._persistence_lock:
+                    enqueued = await self.frontier.enqueue(items) if items else 0
+                    if set_checkpoint:
+                        await set_checkpoint(
+                            self.adapter.source,
+                            entity_type,
+                            next_page=next_page,
+                            completed=analysis.terminal_page is not None,
+                            scope=scope,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                elapsed = time.monotonic() - started
+                DISCOVERY_WINDOWS.labels(
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    outcome="failed",
+                ).inc()
+                DISCOVERY_WINDOW_DURATION.labels(
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    outcome="failed",
+                ).observe(elapsed)
+                logger.error(
+                    "discovery_window_failed",
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    first_page=pages[0],
+                    last_page=pages[-1],
+                    failed_page=None,
+                    error_type=type(exc).__name__,
+                    elapsed_seconds=round(elapsed, 6),
+                    effective_concurrency=len(pages),
+                    stage="persistence",
+                )
+                raise
+            discovered_total += enqueued
             DISCOVERED_ENTITIES.labels(
                 source=self.adapter.source.value,
                 entity_type=entity_type.value,
             ).inc(len(items))
-            pages_processed += 1
-            page += 1
-            if set_checkpoint:
-                await set_checkpoint(
-                    self.adapter.source,
-                    entity_type,
-                    next_page=page,
-                    completed=False,
-                    scope=scope,
-                )
-            logger.info(
-                "discovery_page_complete",
+            elapsed = time.monotonic() - started
+            meaningful_count = len(analysis.meaningful_pages) + int(
+                analysis.terminal_page is not None
+            )
+            requested_count = len(pages)
+            speculative_count = requested_count - meaningful_count
+            items_per_second = len(items) / elapsed if elapsed else 0.0
+            DISCOVERY_WINDOWS.labels(
                 source=self.adapter.source.value,
                 entity_type=entity_type.value,
-                page=page - 1,
-                discovered=len(items),
-                discovered_total=discovered_total,
+                outcome="success",
+            ).inc()
+            DISCOVERY_WINDOW_DURATION.labels(
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+                outcome="success",
+            ).observe(elapsed)
+            for kind, value in (
+                ("meaningful", meaningful_count),
+                ("speculative", speculative_count),
+                ("speculative_empty", analysis.speculative_empty_pages),
+                ("ignored_speculative_failure", analysis.ignored_speculative_failures),
+            ):
+                DISCOVERY_PAGES.labels(
+                    source=self.adapter.source.value,
+                    entity_type=entity_type.value,
+                    kind=kind,
+                ).inc(value)
+            DISCOVERY_ENTITY_RATE.labels(
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+            ).observe(items_per_second)
+            logger.info(
+                "discovery_window_complete",
+                source=self.adapter.source.value,
+                entity_type=entity_type.value,
+                first_page=pages[0],
+                last_page=pages[-1],
+                requested_pages=requested_count,
+                meaningful_pages=meaningful_count,
+                non_empty_pages=len(analysis.meaningful_pages),
+                terminal_page=analysis.terminal_page,
+                speculative_empty_pages=analysis.speculative_empty_pages,
+                ignored_speculative_failures=(
+                    analysis.ignored_speculative_failures
+                ),
+                items_discovered=len(items),
+                items_enqueued=enqueued,
+                elapsed_seconds=round(elapsed, 6),
+                items_per_second=round(items_per_second, 3),
+                effective_concurrency=len(pages),
             )
+            pages_processed += requested_count
+            page = next_page
+            if analysis.terminal_page is not None:
+                break
         return discovered_total
 
 

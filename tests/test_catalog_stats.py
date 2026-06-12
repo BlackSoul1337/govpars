@@ -1,5 +1,7 @@
 import asyncio
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +25,29 @@ from procurement_parser.infrastructure.sources.eep_mitwork.adapter import (
 )
 from procurement_parser.infrastructure.sources.zakup_sk.adapter import ZakupSkAdapter
 
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class FakeEepProbeResponse:
+    def __init__(self, text: str):
+        self.text = text
+        self.strategy = "fake-http"
+
+
+class FakeEepProbeClient:
+    def __init__(self, *, terminal_page: int | None = None):
+        self.terminal_page = terminal_page
+        self.fixture = (FIXTURES / "eep_lots.html").read_text(encoding="utf-8")
+
+    async def get(self, _path, *, params):
+        await asyncio.sleep(0.04)
+        page = params["page"]
+        if self.terminal_page is not None and page == self.terminal_page:
+            return FakeEepProbeResponse("<html></html>")
+        if self.terminal_page is not None and page > self.terminal_page:
+            raise TimeoutError("ignored speculative probe failure")
+        return FakeEepProbeResponse(self.fixture)
+
 
 def test_eep_catalog_total_accepts_grouped_digits() -> None:
     html = "<div class='summary'>Показаны записи 1-50 из 578 183.</div>"
@@ -39,6 +64,37 @@ def test_zakup_catalog_total_accepts_nested_payload() -> None:
     }
 
     assert ZakupSkAdapter._catalog_total(payload) == 6_277
+
+
+async def test_eep_probe_uses_wall_clock_and_keeps_sequential_baseline() -> None:
+    adapter = object.__new__(EepMitworkAdapter)
+    adapter.settings = SimpleNamespace(per_page=50)
+    adapter.client = FakeEepProbeClient()
+
+    result = await adapter.probe_catalog(
+        EntityType.LOT,
+        samples=3,
+        concurrency=6,
+    )
+
+    assert result["configured_concurrency"] == 6
+    assert result["effective_concurrency"] == 3
+    assert result["elapsed_seconds"] < result["sequential_elapsed_seconds"] * 0.6
+
+
+async def test_eep_probe_ignores_failure_after_terminal_page() -> None:
+    adapter = object.__new__(EepMitworkAdapter)
+    adapter.settings = SimpleNamespace(per_page=50)
+    adapter.client = FakeEepProbeClient(terminal_page=2)
+
+    result = await adapter.probe_catalog(
+        EntityType.LOT,
+        samples=3,
+        concurrency=3,
+    )
+
+    assert result["terminal_page"] == 2
+    assert result["ignored_speculative_failures"] == 1
 
 
 def test_profile_list_deduplicates_profiles() -> None:

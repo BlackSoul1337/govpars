@@ -62,6 +62,34 @@ uv run procurement-parser validate-export --input exports/all
 `discover` обходит list pages, сохраняет summary и ставит detail identities в
 `crawl_frontier`. Он не извлекает полную карточку.
 
+EEP обходит страницы `lots`, `buys` и `points` параллельными окнами. Все три
+каталога делят один source-level semaphore: профиль `direct` по умолчанию
+разрешает 6 одновременных list-запросов, proxy-профили — 10. Zakup discovery
+намеренно остаётся последовательным (`1`), поскольку его запросы связаны с
+browser/session lane.
+
+```powershell
+# Профильное значение из config/sources/eep_mitwork.toml
+uv run procurement-parser discover --source eep-mitwork --pages 100
+
+# Временный override только для EEP
+uv run procurement-parser discover --source all --pages 100 `
+  --discovery-concurrency 3 `
+  --eep-network direct --zakup-network direct
+```
+
+Допустимый диапазон `--discovery-concurrency`: `1..64`. При `--source all`
+override не меняет Zakup. Каждое окно сначала полностью загружается и
+разбирается, затем результаты сортируются по номеру страницы и сохраняются
+одним последовательным enqueue. Первая пустая страница завершает каталог.
+Ошибки уже отправленных спекулятивных страниц после неё игнорируются; ошибка
+до неё отменяет всё окно без продвижения checkpoint.
+
+В консоли выводятся `discovery_window_started`, промежуточный
+`discovery_window_progress` каждые 5 секунд и итоговый
+`discovery_window_complete`. Пока окно загружается, данные ещё не enqueue-нуты:
+это нормальное поведение, а не зависание.
+
 `worker` забирает задания через `FOR UPDATE SKIP LOCKED`, извлекает полную
 карточку, сохраняет сущности/связи и добавляет найденные relation tasks.
 
@@ -216,6 +244,10 @@ list-страниц и пробную скорость detail worker. Worker pro
 PostgreSQL. Поле `full_run_forecasts` показывает итоговый прогноз
 `discovery + detail` для каждой комбинации source/runtime/network. Прогноз не
 учитывает retries, UPSERT, reconciliation и повторное обнаружение связей.
+Для EEP `catalog-stats` использует профильную оконную параллельность:
+`elapsed_seconds` является реальным wall-clock временем, а
+`sequential_elapsed_seconds` и `estimated_discovery_seconds_sequential`
+сохраняют последовательный baseline для сравнения.
 Для `--source all` поле `combined_forecasts.parallel_wall_clock` показывает
 время при параллельной работе сайтов, а `sequential_total` — при запуске по
 очереди.

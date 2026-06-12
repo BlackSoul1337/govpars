@@ -20,3 +20,7 @@ plan_items = "/eprocsearch/api/external/plan-items"
 [source.concurrency]
 direct = 2
 proxy = 4
+
+[source.discovery]
+direct = 1
+proxy = 1

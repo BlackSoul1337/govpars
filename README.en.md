@@ -54,6 +54,33 @@ uv run procurement-parser worker --source all --drain `
 extracts details, normalizes data, persists entities/relations, and enqueues
 new relation targets.
 
+EEP discovers `lots`, `buys`, and `points` in parallel windows. All three
+catalogs share one source-level semaphore: the default is 6 concurrent list
+requests for direct access and 10 for proxy profiles. Zakup discovery remains
+strictly sequential (`1`) because requests are bound to browser/session lanes.
+
+```powershell
+# Use the source profile default
+uv run procurement-parser discover --source eep-mitwork --pages 100
+
+# Temporary EEP-only override
+uv run procurement-parser discover --source all --pages 100 `
+  --discovery-concurrency 3 `
+  --eep-network direct --zakup-network direct
+```
+
+`--discovery-concurrency` accepts `1..64`; with `--source all` it never changes
+Zakup. A window is fetched and parsed completely, sorted by page, and persisted
+with one sequential enqueue. The first empty page terminates the catalog.
+Failures from already-issued speculative pages after that terminal page are
+ignored; a failure before it rejects the whole window without advancing the
+checkpoint.
+
+The console emits `discovery_window_started`, a
+`discovery_window_progress` heartbeat every five seconds, and
+`discovery_window_complete`. While a window is downloading it has not yet been
+enqueued; this is expected atomic-window behavior rather than a hang.
+
 Worker modes:
 
 - default: long-running process;
@@ -164,6 +191,9 @@ worker probe does not write to PostgreSQL and therefore excludes queue and
 UPSERT cost. `full_run_forecasts` reports the combined `discovery + detail`
 estimate for each source/runtime/network combination. Retries, UPSERT,
 reconciliation, and duplicate relation discovery are excluded.
+For EEP, `catalog-stats` uses the configured parallel window:
+`elapsed_seconds` is wall-clock time, while `sequential_elapsed_seconds` and
+`estimated_discovery_seconds_sequential` preserve a sequential baseline.
 For `--source all`, `combined_forecasts.parallel_wall_clock` is the expected
 parallel wall time, while `sequential_total` represents running sources one
 after another.

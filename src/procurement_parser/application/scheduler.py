@@ -8,7 +8,10 @@ import structlog
 
 from procurement_parser.application.factory import build_context
 from procurement_parser.application.pipeline import DiscoveryService
-from procurement_parser.config.settings import load_settings
+from procurement_parser.config.settings import (
+    configure_discovery_concurrency,
+    load_settings,
+)
 from procurement_parser.domain.models import EntityType, Source
 from procurement_parser.infrastructure.persistence.postgres.database import Database
 from procurement_parser.infrastructure.persistence.postgres.maintenance import (
@@ -49,6 +52,7 @@ async def run_scheduler(
     runtime_profile: str,
     network_profile: str,
     captcha_profile: str,
+    discovery_concurrency_override: int | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> None:
     stop_event = stop_event or asyncio.Event()
@@ -89,6 +93,9 @@ async def run_scheduler(
                             runtime_profile=runtime_profile,
                             network_profile=network_profile,
                             captcha_profile=captcha_profile,
+                            discovery_concurrency_override=(
+                                discovery_concurrency_override
+                            ),
                             job=job,
                         ),
                         name=f"scheduler-{source.value}-{job.name}",
@@ -112,6 +119,7 @@ async def _execute_job(
     network_profile: str,
     captcha_profile: str,
     job: SchedulerJob,
+    discovery_concurrency_override: int | None = None,
 ) -> None:
     settings = load_settings(
         source=source,
@@ -123,23 +131,26 @@ async def _execute_job(
             else "disabled"
         ),
     )
+    current_discovery_concurrency = configure_discovery_concurrency(
+        settings,
+        discovery_concurrency_override,
+    )
     context = build_context(settings)
     maintenance = PostgresMaintenance(context.database)
     started_at = time.monotonic()
     error: str | None = None
     try:
-        discovery = DiscoveryService(context.adapter, context.frontier)
+        discovery = DiscoveryService(
+            context.adapter,
+            context.frontier,
+            concurrency=current_discovery_concurrency,
+        )
         if job.name == "incremental_lists":
-            for entity_type in _entity_types(source):
-                await discovery.run(
-                    entity_type,
-                    start_page=1,
-                    max_pages=1,
-                    priority=100,
-                    filters=_incremental_filters(source, entity_type),
-                    scope="incremental",
-                    resume=False,
-                )
+            await _run_discovery_catalogs(
+                discovery,
+                source,
+                incremental=True,
+            )
         elif job.name == "active_entities":
             await context.frontier.enqueue_refresh(
                 source,
@@ -165,16 +176,11 @@ async def _execute_job(
                 older_than_seconds=settings.source.old_refresh_seconds,
             )
         elif job.name == "weekly_reconcile":
-            for entity_type in _entity_types(source):
-                await discovery.run(
-                    entity_type,
-                    start_page=1,
-                    max_pages=None,
-                    priority=0,
-                    filters=None,
-                    scope="weekly-reconcile",
-                    resume=False,
-                )
+            await _run_discovery_catalogs(
+                discovery,
+                source,
+                incremental=False,
+            )
             await context.frontier.enqueue_refresh(
                 source,
                 policy="all",
@@ -240,3 +246,37 @@ def _incremental_filters(
         "tenderSubjectTypes": [],
         "advertStatus": "PUBLISHED",
     }
+
+
+async def _run_discovery_catalogs(
+    discovery: DiscoveryService,
+    source: Source,
+    *,
+    incremental: bool,
+) -> None:
+    async def run(entity_type: EntityType) -> int:
+        return await discovery.run(
+            entity_type,
+            start_page=1,
+            max_pages=1 if incremental else None,
+            priority=100 if incremental else 0,
+            filters=(
+                _incremental_filters(source, entity_type)
+                if incremental
+                else None
+            ),
+            scope="incremental" if incremental else "weekly-reconcile",
+            resume=False,
+        )
+
+    if source == Source.ZAKUP_SK:
+        for entity_type in _entity_types(source):
+            await run(entity_type)
+        return
+    results = await asyncio.gather(
+        *(run(entity_type) for entity_type in _entity_types(source)),
+        return_exceptions=True,
+    )
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures:
+        raise failures[0]
