@@ -126,6 +126,22 @@ httpx SSR HTML → selectolax parser
 Обходятся list pages plans/notices/lots и relation URLs
 `/point`, `/buy`, `/lot`, `/subject`.
 
+Почему здесь не используется Playwright:
+
+- EEP возвращает содержимое карточек в SSR HTML по стабильным URL;
+- пагинация работает обычными query parameters;
+- `httpx` не загружает JavaScript, изображения и шрифты, поэтому быстрее,
+  потребляет существенно меньше RAM/CPU и проще масштабируется;
+- `selectolax` разбирает сохранённый HTML детерминированно и позволяет тестировать
+  parser без сети;
+- браузер добавил бы latency и новые причины отказа, не открывая дополнительных
+  данных.
+
+`curl-cffi` является транспортным fallback, а не основным клиентом: он нужен
+только если EEP начнёт проверять TLS/browser fingerprint. Playwright следует
+добавлять для EEP лишь при фактическом переходе нужных данных в JavaScript-only
+API или появлении browser-bound challenge.
+
 ## Zakup strategy
 
 Порядок:
@@ -144,6 +160,26 @@ DOM fallback намеренно не заменяет detail API: частичн
 
 Большой JS bundle обслуживается persistent Chromium profile и disk cache.
 `slow_internet` увеличивает browser timeouts и lease.
+
+Почему Zakup использует несколько стратегий:
+
+- портал является Angular SPA; detail/list API и актуальные request headers
+  становятся известны после исполнения JavaScript;
+- WAF, cookies, browser storage, fingerprint и reCAPTCHA привязаны к одной
+  `SessionIdentity`, поэтому стартовую сессию создаёт Playwright;
+- Playwright перехватывает фактически отправленный браузером API request. После
+  этого `curl-cffi` повторяет совместимые API-вызовы с TLS impersonation быстрее
+  и дешевле, чем отдельная browser navigation для каждой карточки;
+- если подпись, token или body нельзя безопасно воспроизвести, запрос остаётся
+  в `BrowserFetchStrategy`/`NetworkInterceptStrategy`;
+- DOM используется только как контролируемый аварийный источник list identities:
+  detail DOM может быть свёрнут, виртуализирован или неполон.
+
+Следовательно, Playwright здесь является session broker и источником
+авторитетного network request, а не основным HTML parser. Это ограничивает
+стоимость 58 MB SPA bundle, RAM Chromium и чувствительность к изменениям UI.
+Persistent profile и disk cache повторно используют immutable bundle между
+запусками lane; cookies и cache нельзя переносить между разными proxy identities.
 
 ## Queue и leases
 

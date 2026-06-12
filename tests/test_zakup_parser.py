@@ -90,7 +90,16 @@ def test_zakup_normalizes_schedule_contacts_and_source_specific_fields() -> None
         "oktruFullCode": "1066-0004-0001-100042411",
         "oktruCategoryNameRu": "Пылесосы бытовые",
         "lotRowNumber": "335-1 Т",
+        "tenderSubjectType": "GOODS",
         "tenderPriority": "HOLDING_PRODUCER",
+        "acceptanceBeginDateTime": "2026-06-10T09:00:00+05:00",
+        "acceptanceEndDateTime": "2026-06-16T10:00:00+05:00",
+        "timeHistory": [
+            {
+                "status": "PUBLISHED",
+                "eventDate": "2026-06-10T08:30:00+05:00",
+            }
+        ],
         "tenderLocationRu": "Бостандыкский район",
         "email": "buyer@example.kz",
         "phone": "+7 700 000 00 00",
@@ -113,6 +122,10 @@ def test_zakup_normalizes_schedule_contacts_and_source_specific_fields() -> None
     assert lot.additional_characteristics_ru == "Дополнительная характеристика"
     assert lot.oktru_code == "1066-0004-0001-100042411"
     assert lot.plan_row_number == "335-1 Т"
+    assert lot.plan_item_type == "GOODS"
+    assert lot.published_at.isoformat() == "2026-06-10T08:30:00+05:00"
+    assert lot.application_start_at.isoformat() == "2026-06-10T09:00:00+05:00"
+    assert lot.application_end_at.isoformat() == "2026-06-16T10:00:00+05:00"
     assert (
         lot.delivery_terms_ru
         == "С даты подписания договора в течение 30 календарных дней"

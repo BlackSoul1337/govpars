@@ -57,13 +57,37 @@ new relation targets.
 Worker modes:
 
 - default: long-running process;
-- `--once`: one claimed batch;
-- `--drain`: run until the selected source queue is stably empty;
+- `--once`: each internal worker claims at most one batch, so the process can
+  handle up to roughly `workers × batch_size` cards rather than one card;
+- `--drain`: process the selected source, including relation-discovered tasks,
+  until queue depth and active leases stay at zero for the idle grace period;
 - `--idle-grace-seconds`: empty-queue confirmation interval.
 
-`--once` and `--drain` are mutually exclusive. Lease heartbeats protect long
-Zakup requests. `SIGINT/SIGTERM` releases worker-owned leases; `SIGKILL` falls
-back to lease expiration.
+`--once` and `--drain` are mutually exclusive. With `--source all`, EEP and
+Zakup drain independently in parallel. Stop the scheduler before a finite
+drain, otherwise it can refill the queue. Lease heartbeats protect long Zakup
+requests. `SIGINT/SIGTERM` releases worker-owned leases; `SIGKILL`, an OS crash,
+or power loss falls back to `leased_until` expiration.
+
+## Data completeness
+
+Data is stored at two levels:
+
+1. normalized columns for querying, relations, and CSV;
+2. the complete received source response in the `source_payload` JSONB column.
+
+Zakup keeps the original API JSON. EEP keeps extracted SSR fields, tables,
+views, and the page title. The normalized layer covers identities, business
+numbers, titles, descriptions and characteristics, statuses, procurement
+method and subject type, amounts, quantities, units, application dates,
+delivery, payment, contacts, organizations, document metadata, and relations.
+
+"Complete" means everything returned by the public endpoint or page used by
+the parser, not hidden internal data or document binaries. Missing source
+fields remain `NULL`. For example, a Zakup notice often has no description
+because descriptions belong to its child lots, and a publication timestamp is
+not inferred from the `PUBLISHED` status alone. Source-specific fields without
+a shared EEP/Zakup meaning remain available in `source_payload`.
 
 ## Docker
 

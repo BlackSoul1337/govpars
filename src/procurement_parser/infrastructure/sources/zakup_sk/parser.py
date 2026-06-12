@@ -26,7 +26,7 @@ from procurement_parser.domain.models import (
     Source,
 )
 
-PARSER_VERSION = "zakup-2"
+PARSER_VERSION = "zakup-3"
 BASE_URL = "https://zakup.sk.kz"
 PORTAL_TZ = ZoneInfo("Asia/Almaty")
 
@@ -73,6 +73,56 @@ def _datetime(value: Any) -> datetime | None:
         return result.replace(tzinfo=result.tzinfo or PORTAL_TZ)
     except ValueError:
         return None
+
+
+def _published_at(payload: dict[str, Any]) -> datetime | None:
+    direct = _datetime(
+        _pick(
+            payload,
+            "publishDate",
+            "publishedDate",
+            "publicationDate",
+            "datePublished",
+        )
+    )
+    if direct:
+        return direct
+
+    history = payload.get("timeHistory")
+    if isinstance(history, dict):
+        history = _items(history)
+    if not isinstance(history, list):
+        return None
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        status = str(
+            _pick(
+                item,
+                "status",
+                "advertStatus",
+                "lotStatus",
+                "simpleStatus",
+                "event",
+            )
+            or ""
+        ).upper()
+        if "PUBLISH" not in status:
+            continue
+        published = _datetime(
+            _pick(
+                item,
+                "date",
+                "eventDate",
+                "changeDate",
+                "createdDate",
+                "createdAt",
+                "dateTime",
+            )
+        )
+        if published:
+            return published
+    return None
 
 
 def _items(payload: Any) -> list[dict[str, Any]]:
@@ -476,6 +526,9 @@ def parse_detail(
         oktru_category_ru=_pick(payload, "oktruCategoryNameRu"),
         oktru_category_kk=_pick(payload, "oktruCategoryNameKk"),
         plan_row_number=_pick(payload, "lotRowNumber"),
+        plan_item_type=_text(
+            _pick(payload, "tenderSubjectType", "subjectType", "truType")
+        ),
         priority=_text(_pick(payload, "tenderPriority")),
         quantity=_decimal(_pick(payload, "quantity", "count")),
         unit=_text(_pick(payload, "measureNameRu", "unitNameRu", "measure", "mkei")),
@@ -484,17 +537,43 @@ def parse_detail(
             _pick(payload, "sum", "totalSum", "sumNoNds", "sumTruNoNds")
         ),
         currency=_pick(payload, "currency", "currencyCode") or "KZT",
-        published_at=_datetime(_pick(payload, "publishDate", "publishedDate")),
+        published_at=_published_at(payload),
         application_start_at=_datetime(
-            _pick(payload, "beginDate", "acceptanceBeginDateTime")
+            _pick(
+                payload,
+                "beginDate",
+                "beginDateTime",
+                "acceptanceBeginDateTime",
+            )
         ),
         application_end_at=_datetime(
-            _pick(payload, "endDate", "acceptanceEndDateTime")
+            _pick(
+                payload,
+                "endDate",
+                "endDateTime",
+                "acceptanceEndDateTime",
+            )
         ),
         delivery_terms_ru=_delivery_schedule(payload, "ru"),
         delivery_terms_kk=_delivery_schedule(payload, "kk"),
-        delivery_conditions_ru=_text(_pick(payload, "incoterms"), language="Ru"),
-        delivery_conditions_kk=_text(_pick(payload, "incoterms"), language="Kk"),
+        delivery_conditions_ru=_text(
+            _pick(
+                payload,
+                "deliveryConditionRu",
+                "deliveryConditionsRu",
+                "incoterms",
+            ),
+            language="Ru",
+        ),
+        delivery_conditions_kk=_text(
+            _pick(
+                payload,
+                "deliveryConditionKk",
+                "deliveryConditionsKk",
+                "incoterms",
+            ),
+            language="Kk",
+        ),
         venue_ru=_pick(payload, "tenderLocationRu", "tenderLocation"),
         venue_kk=_pick(payload, "tenderLocationKk"),
         contact_email=_pick(payload, "email"),

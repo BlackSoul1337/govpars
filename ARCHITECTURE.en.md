@@ -61,6 +61,19 @@ httpx SSR HTML → selectolax
                  ↘ curl-cffi WAF/transport fallback
 ```
 
+Playwright is intentionally absent from the normal EEP path:
+
+- detail data is returned in SSR HTML at stable URLs;
+- pagination uses ordinary query parameters;
+- `httpx` avoids JavaScript, image, and font downloads, making it faster and
+  considerably cheaper in RAM and CPU;
+- saved HTML can be parsed deterministically by `selectolax` in offline tests;
+- a browser would add latency and failure modes without exposing more data.
+
+`curl-cffi` is only a transport fallback when TLS/browser impersonation is
+required. Playwright should be introduced for EEP only if required data moves
+to a JavaScript-only API or a browser-bound challenge appears.
+
 Zakup:
 
 1. CurlCffi API;
@@ -71,6 +84,26 @@ Zakup:
 Playwright captures legitimate request URL, method, body, and headers while
 excluding transport-owned headers. Detail DOM fallback is intentionally
 disabled to prevent partial data from overwriting full API entities.
+
+Zakup needs the layered strategy because it is an Angular SPA. JavaScript
+establishes the API contract and current request headers, while WAF state,
+cookies, browser storage, fingerprint, and reCAPTCHA belong to one
+`SessionIdentity`. Playwright therefore bootstraps the session and captures the
+request actually sent by the browser.
+
+Compatible API calls are then replayed through `curl-cffi` with TLS
+impersonation because that is faster and less resource-intensive than a browser
+navigation per card. Requests whose signature, token, timestamp, or body cannot
+be reproduced remain on `BrowserFetchStrategy` or
+`NetworkInterceptStrategy`. DOM parsing is restricted to emergency list
+identity discovery because detail DOM can be collapsed, virtualized, or
+incomplete.
+
+Playwright is therefore a session broker and authoritative network-request
+source, not the preferred HTML parser. Persistent Chromium profiles and disk
+cache amortize the roughly 58 MB immutable SPA bundle between lane runs.
+Cookies, storage, and cache are never transferred between different proxy
+identities.
 
 ## Durable Queue
 

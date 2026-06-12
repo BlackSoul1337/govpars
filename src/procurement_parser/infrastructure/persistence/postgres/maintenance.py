@@ -125,7 +125,16 @@ class PostgresMaintenance:
                     text(
                         """
                         SELECT COALESCE(se.source, 'unknown') AS source,
-                               count(*) AS count
+                               count(*) AS count,
+                               count(*) FILTER (
+                                   WHERE f.created_at >= now() - interval '24 hours'
+                               ) AS last_24h,
+                               count(*) FILTER (
+                                   WHERE f.error ILIKE '%session lane%'
+                               ) AS session_lane_events,
+                               count(*) FILTER (
+                                   WHERE f.http_status IS NOT NULL
+                               ) AS http_events
                         FROM fetch_failures f
                         LEFT JOIN source_entities se ON se.id = f.source_entity_fk
                         GROUP BY COALESCE(se.source, 'unknown')
@@ -208,6 +217,19 @@ class PostgresMaintenance:
             "fetch_failures": {
                 row["source"]: row["count"] for row in failure_counts
             },
+            "fetch_failure_events": {
+                row["source"]: {
+                    "total": row["count"],
+                    "last_24h": row["last_24h"],
+                    "session_lane_events": row["session_lane_events"],
+                    "http_events": row["http_events"],
+                }
+                for row in failure_counts
+            },
+            "fetch_failures_note": (
+                "Historical fetch/retry events; permanent task failures are "
+                "reported in task_history as '<source>:failed'."
+            ),
             "crawl_frontier_dead_tuples": dead_tuples,
             "crawl_frontier_dead_tuple_ratio": round(
                 dead_tuples / max(1, live_tuples + dead_tuples),
