@@ -1,4 +1,5 @@
 [network]
+# Test-only free proxy pool. Addresses can expire at any time; revalidate before use.
 kind = "static_proxy"
 proxy_pool_file = "proxy_pools/public_working.json"
 proxy_pool_index_env = "PROXY_POOL_INDEX"

@@ -311,8 +311,6 @@ class ZakupStrategyStack:
             await self.source_breaker.record_success()
             return response
 
-        await self.lane_breaker.record_status(response.status)
-        await self.source_breaker.record_status(response.status)
         await self.browser.start()
         assert self.browser.identity is not None
         self.direct.identity = self.browser.identity
@@ -345,8 +343,6 @@ class ZakupStrategyStack:
                 await self.lane_breaker.record_success()
                 await self.source_breaker.record_success()
                 return intercepted
-            await self.lane_breaker.record_status(intercepted.status)
-            await self.source_breaker.record_status(intercepted.status)
         return await self._browser_request(
             method,
             url,
@@ -369,8 +365,6 @@ class ZakupStrategyStack:
             method, url, params=params, body=body, profile=profile
         )
         if response.status in {403, 418, 429}:
-            await self.lane_breaker.record_status(response.status)
-            await self.source_breaker.record_status(response.status)
             bind_contextvars(strategy=self.network_intercept.name)
             response = await self.network_intercept.request(
                 method,

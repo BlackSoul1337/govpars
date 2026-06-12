@@ -1,0 +1,255 @@
+{
+  "warning": "Free public proxies validated on 2026-06-11; they may already be unavailable or unsafe. Revalidate before use.",
+  "generated_at": "2026-06-11T18:12:22.246038+00:00",
+  "target_url": "https://zakup.sk.kz/content/js/settings.js",
+  "tested": 10006,
+  "working_count": 27,
+  "proxies": [
+    {
+      "url": "http://158.255.212.55:7839",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:23.312012+00:00",
+      "latency_ms": 782,
+      "target_status": 200
+    },
+    {
+      "url": "http://158.255.212.55:9480",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:23.318012+00:00",
+      "latency_ms": 797,
+      "target_status": 200
+    },
+    {
+      "url": "http://158.255.212.55:9005",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:23.349728+00:00",
+      "latency_ms": 828,
+      "target_status": 200
+    },
+    {
+      "url": "http://37.49.224.15:3128",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:48.109744+00:00",
+      "latency_ms": 843,
+      "target_status": 200
+    },
+    {
+      "url": "socks5://195.133.8.226:1080",
+      "source": "free-proxy-list.json",
+      "protocol_confidence": "declared",
+      "country": "KZ",
+      "reported_uptime": 77.07257287927864,
+      "checked_at": "2026-06-11T18:11:12.935018+00:00",
+      "latency_ms": 891,
+      "target_status": 200
+    },
+    {
+      "url": "http://185.200.188.234:10001",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:35.223806+00:00",
+      "latency_ms": 1234,
+      "target_status": 200
+    },
+    {
+      "url": "http://176.111.37.216:39811",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:33.393214+00:00",
+      "latency_ms": 1875,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.140.169.241:8081",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:59.240903+00:00",
+      "latency_ms": 1969,
+      "target_status": 200
+    },
+    {
+      "url": "http://128.140.113.110:1080",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:15.680754+00:00",
+      "latency_ms": 2188,
+      "target_status": 200
+    },
+    {
+      "url": "http://34.43.46.91:80",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:49.358435+00:00",
+      "latency_ms": 2234,
+      "target_status": 200
+    },
+    {
+      "url": "http://170.81.242.93:3128",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:27.685645+00:00",
+      "latency_ms": 2407,
+      "target_status": 200
+    },
+    {
+      "url": "http://128.140.113.110:4145",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:15.965783+00:00",
+      "latency_ms": 2438,
+      "target_status": 200
+    },
+    {
+      "url": "http://187.102.219.64:999",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:37.603078+00:00",
+      "latency_ms": 3125,
+      "target_status": 200
+    },
+    {
+      "url": "http://195.9.238.36:8080",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:38.261223+00:00",
+      "latency_ms": 3141,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.131.65.238:3128",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:00.027677+00:00",
+      "latency_ms": 3218,
+      "target_status": 200
+    },
+    {
+      "url": "http://187.102.219.42:999",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:37.894618+00:00",
+      "latency_ms": 3422,
+      "target_status": 200
+    },
+    {
+      "url": "http://80.150.246.98:443",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:16.480487+00:00",
+      "latency_ms": 3546,
+      "target_status": 200
+    },
+    {
+      "url": "socks5://213.148.6.12:7777",
+      "source": "free-proxy-list.json",
+      "protocol_confidence": "declared",
+      "country": "KZ",
+      "reported_uptime": 59.500105909764876,
+      "checked_at": "2026-06-11T18:11:15.614216+00:00",
+      "latency_ms": 3578,
+      "target_status": 200
+    },
+    {
+      "url": "http://185.118.51.230:3128",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:35.709732+00:00",
+      "latency_ms": 4000,
+      "target_status": 200
+    },
+    {
+      "url": "socks5://46.8.31.104:1080",
+      "source": "free-proxy-list.json",
+      "protocol_confidence": "declared",
+      "country": "KZ",
+      "reported_uptime": 32.19888663967611,
+      "checked_at": "2026-06-11T18:11:16.297468+00:00",
+      "latency_ms": 4250,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.71.186.211:999",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:02.466946+00:00",
+      "latency_ms": 5172,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.131.65.238:4145",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:02.210270+00:00",
+      "latency_ms": 5406,
+      "target_status": 200
+    },
+    {
+      "url": "http://116.203.139.209:4145",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:18.535861+00:00",
+      "latency_ms": 5578,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.131.65.238:999",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:02.541591+00:00",
+      "latency_ms": 5734,
+      "target_status": 200
+    },
+    {
+      "url": "http://45.131.65.238:8080",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:12:02.560447+00:00",
+      "latency_ms": 5750,
+      "target_status": 200
+    },
+    {
+      "url": "http://113.160.132.26:8080",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:19.689027+00:00",
+      "latency_ms": 6781,
+      "target_status": 200
+    },
+    {
+      "url": "http://2.26.87.216:1080",
+      "source": "proxies.json",
+      "protocol_confidence": "assumed_http",
+      "country": null,
+      "checked_at": "2026-06-11T18:11:42.409399+00:00",
+      "latency_ms": 7141,
+      "target_status": 200
+    }
+  ]
+}

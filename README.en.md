@@ -44,7 +44,7 @@ uv run procurement-parser worker --source zakup-sk --drain `
   --runtime local --network direct --captcha manual
 
 # Both, with independent network profiles
-uv run procurement-parser discover --source all --pages 0 `
+uv run procurement-parser discover --source all --pages 0 --no-resume `
   --eep-network direct --zakup-network residential --captcha 2captcha
 uv run procurement-parser worker --source all --drain `
   --eep-network direct --zakup-network residential --captcha 2captcha
@@ -80,6 +80,78 @@ historical full-site discovery. Stop safely with:
 docker compose --profile full stop -t 600
 docker compose --profile full down -t 600
 ```
+
+### Quick catalog estimate
+
+This command only performs sample list requests and does not write to PostgreSQL:
+
+```powershell
+uv run procurement-parser catalog-stats --source all --samples 1 `
+  --eep-network direct --zakup-network direct --captcha manual
+```
+
+Compare several profiles and probe `extract → parse → relations`:
+
+The safest form for every shell is a single line:
+
+```text
+uv run procurement-parser catalog-stats --source all --samples 1 --worker-samples 2 --runtime-profiles local,slow_internet --network-profiles direct,public_pool --captcha disabled --progress-interval-seconds 5 --probe-timeout-seconds 180
+```
+
+PowerShell uses a backtick at the end of each continued line:
+
+```powershell
+uv run procurement-parser catalog-stats --source all --samples 1 `
+  --worker-samples 2 `
+  --runtime-profiles local,slow_internet `
+  --network-profiles direct,public_pool `
+  --captcha disabled `
+  --progress-interval-seconds 5 `
+  --probe-timeout-seconds 180
+```
+
+Bash uses a backslash:
+
+```bash
+uv run procurement-parser catalog-stats --source all --samples 1 \
+  --worker-samples 2 \
+  --runtime-profiles local,slow_internet \
+  --network-profiles direct,public_pool \
+  --captcha disabled \
+  --progress-interval-seconds 5 \
+  --probe-timeout-seconds 180
+```
+
+Progress is written to stderr as `START`, `WAIT`, `DONE`, `FAIL`, and `SKIP`
+messages every 10 seconds. Change it with `--progress-interval-seconds 30` or
+disable it with `--no-progress`. The final JSON remains on stdout. Each
+catalog/detail probe is limited to 600 seconds; change it with
+`--probe-timeout-seconds`.
+
+Save the complete report directly when terminal scrollback is limited:
+
+```powershell
+uv run procurement-parser catalog-stats --source all --samples 1 --worker-samples 2 --output reports/catalog-stats.json
+```
+
+The result includes total catalog counts, response time, list discovery speed,
+an estimated discovery duration, and sample detail worker throughput. The
+worker probe does not write to PostgreSQL and therefore excludes queue and
+UPSERT cost. `full_run_forecasts` reports the combined `discovery + detail`
+estimate for each source/runtime/network combination. Retries, UPSERT,
+reconciliation, and duplicate relation discovery are excluded.
+For `--source all`, `combined_forecasts.parallel_wall_clock` is the expected
+parallel wall time, while `sequential_total` represents running sources one
+after another.
+
+### Discovery checkpoints
+
+`--resume` continues from the PostgreSQL checkpoint `next_page` and exits
+immediately when the full scope is already marked completed. `--no-resume`
+ignores the checkpoint as a starting position and begins at page one, or at
+`--start-page`. It neither clears the database nor forces already successful
+detail cards to be downloaded again: the repeated list scan updates summaries
+and queues new or previously unfinished IDs.
 
 ## Scheduler
 
@@ -135,8 +207,12 @@ uv run procurement-parser worker --source zakup-sk `
   --network residential --captcha 2captcha
 ```
 
-Real public proxy lists and generated pools are ignored by Git.
-`config/proxy_pools/public_pool.example.json` documents the format.
+Raw public proxy lists and generated test pools are ignored by Git.
+`config/proxy_pools/public_pool.example.json` documents the format. The
+repository also contains `config/proxy_pools/public_working.json`, validated on
+June 11, 2026. These free public proxies have no availability, safety, or IP
+stability guarantees. Revalidate them before every run and use a paid sticky
+residential/mobile pool for a full backfill.
 
 ## CAPTCHA
 

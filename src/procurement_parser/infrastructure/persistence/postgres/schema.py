@@ -187,8 +187,8 @@ class ProcurementColumns:
     venue_ru: Mapped[str | None] = mapped_column(Text)
     venue_kk: Mapped[str | None] = mapped_column(Text)
     contact_email: Mapped[str | None] = mapped_column(String(320))
-    contact_phone: Mapped[str | None] = mapped_column(String(128))
-    contact_extension: Mapped[str | None] = mapped_column(String(64))
+    contact_phone: Mapped[str | None] = mapped_column(Text)
+    contact_extension: Mapped[str | None] = mapped_column(Text)
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -220,7 +220,7 @@ class OrganizationRow(Base):
     name_kk: Mapped[str | None] = mapped_column(Text)
     bin: Mapped[str | None] = mapped_column(String(32), index=True)
     address: Mapped[str | None] = mapped_column(Text)
-    phone: Mapped[str | None] = mapped_column(String(128))
+    phone: Mapped[str | None] = mapped_column(Text)
     email: Mapped[str | None] = mapped_column(String(320))
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -248,7 +248,7 @@ class DeliveryPlaceRow(Base):
     country: Mapped[str | None] = mapped_column(String(128))
     address: Mapped[str | None] = mapped_column(Text)
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
-    incoterms: Mapped[str | None] = mapped_column(String(64))
+    incoterms: Mapped[str | None] = mapped_column(Text)
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
 
 

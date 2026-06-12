@@ -616,12 +616,12 @@ class ZakupBrowserSession:
         if self.context:
             try:
                 await self.context.close()
-            except PlaywrightError:
+            except Exception:
                 pass
         if self.playwright:
             try:
                 await self.playwright.stop()
-            except PlaywrightError:
+            except Exception:
                 pass
         self.context = None
         self.page = None

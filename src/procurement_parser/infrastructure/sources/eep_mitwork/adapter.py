@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
+
+from selectolax.parser import HTMLParser
 
 from procurement_parser.config.settings import NetworkSettings, SourceSettings
 from procurement_parser.domain.models import (
@@ -60,6 +63,47 @@ class EepMitworkAdapter:
             response.strategy,
         )
         return parse_list(response.text, entity_type, priority=priority)
+
+    async def probe_catalog(
+        self,
+        entity_type: EntityType,
+        *,
+        samples: int = 1,
+    ) -> dict:
+        if entity_type not in LIST_PATHS:
+            raise ValueError(f"Unsupported EEP catalog: {entity_type.value}")
+        started = time.monotonic()
+        returned = 0
+        total = None
+        strategy = None
+        sample_identities = []
+        for page in range(1, samples + 1):
+            response = await self.client.get(
+                LIST_PATHS[entity_type],
+                params={"page": page, "per-page": self.settings.per_page},
+            )
+            strategy = response.strategy
+            discovered = parse_list(response.text, entity_type, priority=0)
+            returned += len(discovered)
+            sample_identities.extend(item.identity for item in discovered)
+            if total is None:
+                total = self._catalog_total(response.text)
+        elapsed = time.monotonic() - started
+        return {
+            "total": total,
+            "returned": returned,
+            "samples": samples,
+            "page_size": self.settings.per_page,
+            "elapsed_seconds": elapsed,
+            "strategy": strategy,
+            "sample_identities": sample_identities,
+        }
+
+    @staticmethod
+    def _catalog_total(html: str) -> int | None:
+        text = HTMLParser(html).text(separator=" ", strip=True)
+        match = re.search(r"(?:из|of)\s+([\d\s\u00a0]+)", text, re.IGNORECASE)
+        return int(re.sub(r"\D", "", match.group(1))) if match else None
 
     async def extract(self, identity: EntityIdentity) -> ExtractedBatch:
         singular = ENTITY_PATHS[identity.entity_type]

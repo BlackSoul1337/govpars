@@ -77,7 +77,7 @@ uv run procurement-parser worker --source zakup-sk --drain `
   --runtime local --network direct --captcha manual
 
 # Оба источника параллельно
-uv run procurement-parser discover --source all --pages 0 `
+uv run procurement-parser discover --source all --pages 0 --no-resume `
   --eep-network direct --zakup-network residential --captcha 2captcha
 uv run procurement-parser worker --source all --drain `
   --eep-network direct --zakup-network residential --captcha 2captcha
@@ -113,6 +113,13 @@ uv run procurement-parser discover --source eep-mitwork --resume
 uv run procurement-parser discover --source eep-mitwork --no-resume --pages 0
 ```
 
+`--resume` продолжает с `next_page` из PostgreSQL checkpoint и сразу
+завершается, если полный scope уже отмечен как completed. `--no-resume`
+игнорирует checkpoint как стартовую позицию и начинает с первой страницы
+(либо с `--start-page`). Он не удаляет БД и не заставляет повторно скачивать
+уже успешно сохранённые detail-карточки: повторный list scan обновляет summary
+и ставит в очередь новые или ранее не завершённые ID.
+
 Для полного backfill:
 
 1. остановите scheduler выбранного источника;
@@ -122,6 +129,62 @@ uv run procurement-parser discover --source eep-mitwork --no-resume --pages 0
 5. экспортируйте и проверьте CSV.
 
 Числовые detail ID вслепую не перебираются.
+
+### Быстрая оценка каталогов
+
+Команда делает только пробные list-запросы, ничего не пишет в PostgreSQL:
+
+```powershell
+uv run procurement-parser catalog-stats --source all --samples 1 `
+  --eep-network direct --zakup-network direct --captcha manual
+```
+
+Сравнение нескольких профилей и пробный `extract → parse → relations`:
+
+Самый надёжный вариант для любого shell — одна строка:
+
+```text
+uv run procurement-parser catalog-stats --source all --samples 1 --worker-samples 2 --runtime-profiles local,slow_internet --network-profiles direct,public_pool --captcha disabled --progress-interval-seconds 5 --probe-timeout-seconds 180
+```
+
+PowerShell использует обратный апостроф в конце каждой продолжаемой строки:
+
+```powershell
+uv run procurement-parser catalog-stats --source all --samples 1 `
+  --worker-samples 2 `
+  --runtime-profiles local,slow_internet `
+  --network-profiles direct,public_pool `
+  --captcha disabled `
+  --progress-interval-seconds 5 `
+  --probe-timeout-seconds 180
+```
+
+Bash использует обратный слеш:
+
+```bash
+uv run procurement-parser catalog-stats --source all --samples 1 \
+  --worker-samples 2 \
+  --runtime-profiles local,slow_internet \
+  --network-profiles direct,public_pool \
+  --captcha disabled \
+  --progress-interval-seconds 5 \
+  --probe-timeout-seconds 180
+```
+
+Прогресс выводится в stderr строками `START`, `WAIT`, `DONE`, `FAIL` и `SKIP`
+каждые 10 секунд. Интервал можно изменить через
+`--progress-interval-seconds 30`, отключить через `--no-progress`. Финальный
+JSON остаётся в stdout. Один catalog/detail probe ограничен 600 секундами;
+изменить лимит можно через `--probe-timeout-seconds`.
+
+Результат содержит общее количество элементов, время ответа, скорость обхода
+list-страниц и пробную скорость detail worker. Worker probe не пишет данные в
+PostgreSQL. Поле `full_run_forecasts` показывает итоговый прогноз
+`discovery + detail` для каждой комбинации source/runtime/network. Прогноз не
+учитывает retries, UPSERT, reconciliation и повторное обнаружение связей.
+Для `--source all` поле `combined_forecasts.parallel_wall_clock` показывает
+время при параллельной работе сайтов, а `sequential_total` — при запуске по
+очереди.
 
 ## Scheduler
 
@@ -234,8 +297,12 @@ uv run procurement-parser proxy-pool-check `
   --output config/proxy_pools/public_working.json
 ```
 
-`config/proxy_pools/public_pool.example.json` показывает только формат.
-Бесплатные прокси непригодны для гарантированного SLA.
+`config/proxy_pools/public_pool.example.json` показывает формат. Репозиторий
+также содержит `config/proxy_pools/public_working.json`, проверенный 11 июня
+2026 года. Это бесплатные публичные прокси без гарантий доступности,
+безопасности или сохранения адреса: перед каждым запуском их нужно повторно
+валидировать. Для полного backfill используйте платный sticky
+residential/mobile pool.
 
 ## CAPTCHA
 

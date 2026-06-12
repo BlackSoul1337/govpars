@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import SecretStr
@@ -13,7 +16,7 @@ from procurement_parser.config.settings import (
     RuntimeSettings,
     SourceSettings,
 )
-from procurement_parser.domain.errors import SourceBlockedError
+from procurement_parser.domain.errors import RetriableSourceError, SourceBlockedError
 from procurement_parser.domain.models import (
     DiscoveredEntity,
     EntityIdentity,
@@ -308,6 +311,22 @@ class ZakupSkAdapter:
             return False
         return time.monotonic() - self._lane_started_at[lane_index] >= ttl
 
+    def _unavailable_lane_delay(self) -> int:
+        now = datetime.now(UTC)
+        lane_delays = [
+            max(1, math.ceil((until - now).total_seconds()))
+            for stack in self.stacks
+            if (until := stack.lane_breaker.cooldown_until) and until > now
+        ]
+        lane_delay = min(lane_delays, default=self.network.cooldown_seconds)
+        source_until = self.source_breaker.cooldown_until
+        source_delay = (
+            max(1, math.ceil((source_until - now).total_seconds()))
+            if source_until and source_until > now
+            else 0
+        )
+        return max(1, lane_delay, source_delay)
+
     async def _request(
         self,
         method: str,
@@ -383,7 +402,11 @@ class ZakupSkAdapter:
             return last_response
         if last_error is not None:
             raise last_error
-        raise RuntimeError("No Zakup session lane is available")
+        raise RetriableSourceError(
+            "No Zakup session lane is currently available",
+            delay_seconds=self._unavailable_lane_delay(),
+            strategy="session-lane-pool",
+        )
 
     async def _ensure_runtime_state(self) -> None:
         if self._runtime_state_loaded:
@@ -515,6 +538,81 @@ class ZakupSkAdapter:
         self._observe(response.status, response.strategy, time.monotonic() - started)
         self._ensure_success(response.status, response.strategy)
         return parse_discovery(response.data, entity_type, priority=priority)
+
+    async def probe_catalog(
+        self,
+        entity_type: EntityType,
+        *,
+        samples: int = 1,
+    ) -> dict:
+        if entity_type not in {EntityType.LOT, EntityType.NOTICE}:
+            raise ValueError(f"Unsupported Zakup catalog: {entity_type.value}")
+        endpoint = self._endpoint(entity_type)
+        started = time.monotonic()
+        returned = 0
+        total = None
+        strategy = None
+        sample_identities = []
+        for page in range(samples):
+            response = await self._request(
+                "POST",
+                f"{self.settings.base_url}{endpoint}/filter",
+                params={
+                    "page": page,
+                    "size": self.settings.per_page,
+                    "sort": "id,desc",
+                },
+                body={"tenderSubjectTypes": []},
+            )
+            self._ensure_success(response.status, response.strategy)
+            strategy = response.strategy
+            discovered = parse_discovery(response.data, entity_type, priority=0)
+            returned += len(discovered)
+            sample_identities.extend(item.identity for item in discovered)
+            if total is None:
+                total = self._catalog_total(response.data)
+            if total is None:
+                total = await self._visible_catalog_total(entity_type)
+        elapsed = time.monotonic() - started
+        return {
+            "total": total,
+            "returned": returned,
+            "samples": samples,
+            "page_size": self.settings.per_page,
+            "elapsed_seconds": elapsed,
+            "strategy": strategy,
+            "sample_identities": sample_identities,
+        }
+
+    @classmethod
+    def _catalog_total(cls, payload: Any) -> int | None:
+        if isinstance(payload, dict):
+            for key in ("totalElements", "totalCount", "total"):
+                value = payload.get(key)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.isdigit():
+                    return int(value)
+            for value in payload.values():
+                result = cls._catalog_total(value)
+                if result is not None:
+                    return result
+        return None
+
+    async def _visible_catalog_total(
+        self,
+        entity_type: EntityType,
+    ) -> int | None:
+        tab = "lot" if entity_type == EntityType.LOT else "advert"
+        for stack in self.stacks:
+            page = stack.browser.page
+            if page is None or f"tabs={tab}" not in page.url:
+                continue
+            text = await page.locator("body").inner_text()
+            match = re.search(r"Найдено\s+([\d\s\u00a0]+)", text, re.IGNORECASE)
+            if match:
+                return int(re.sub(r"\D", "", match.group(1)))
+        return None
 
     async def extract(self, identity: EntityIdentity) -> ExtractedBatch:
         endpoint = self._endpoint(identity.entity_type)

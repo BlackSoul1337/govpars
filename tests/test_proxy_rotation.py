@@ -10,6 +10,7 @@ import structlog
 from httpx import Response
 
 from procurement_parser.config.settings import load_settings
+from procurement_parser.domain.errors import RetriableSourceError
 from procurement_parser.domain.models import Source
 from procurement_parser.infrastructure.captcha.solvers import DisabledCaptchaSolver
 from procurement_parser.infrastructure.network.proxy_pool import ProxyPoolCursor
@@ -255,6 +256,40 @@ async def test_direct_zakup_does_not_retry_or_rotate_an_open_lane(monkeypatch) -
             exhausted=True,
         )
         assert adapter.stacks[lane_index] is healthy_stack
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_zakup_unavailable_lanes_schedule_cooldown_retry(monkeypatch) -> None:
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    settings = load_settings(
+        source=Source.ZAKUP_SK,
+        runtime_profile="local",
+        network_profile="direct",
+        captcha_profile="disabled",
+        config_dir=Path("config"),
+    )
+    adapter = ZakupSkAdapter(
+        settings.source,
+        settings.network,
+        settings.captcha,
+        DisabledCaptchaSolver(),
+        settings.runtime,
+    )
+    try:
+        for stack in adapter.stacks:
+            for _ in range(settings.network.block_threshold):
+                await stack.lane_breaker.record_transport_failure()
+
+        with pytest.raises(RetriableSourceError) as error:
+            await adapter._request(
+                "GET",
+                "https://zakup.sk.kz/eprocsearch/api/external/lots/1",
+            )
+
+        assert error.value.strategy == "session-lane-pool"
+        assert error.value.delay_seconds > 500
     finally:
         await adapter.close()
 

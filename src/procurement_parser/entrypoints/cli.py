@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import structlog
 import typer
@@ -19,6 +20,7 @@ from procurement_parser.application.pipeline import DiscoveryService, WorkerServ
 from procurement_parser.application.scheduler import run_scheduler
 from procurement_parser.config.settings import load_settings
 from procurement_parser.domain.models import EntityType, Source
+from procurement_parser.infrastructure.captcha.solvers import build_captcha_solver
 from procurement_parser.infrastructure.network.proxy_pool import (
     build_proxy_pool,
     check_proxy_pool,
@@ -30,6 +32,8 @@ from procurement_parser.infrastructure.persistence.postgres.exporter import (
 from procurement_parser.infrastructure.persistence.postgres.maintenance import (
     PostgresMaintenance,
 )
+from procurement_parser.infrastructure.sources.eep_mitwork.adapter import EepMitworkAdapter
+from procurement_parser.infrastructure.sources.zakup_sk.adapter import ZakupSkAdapter
 from procurement_parser.infrastructure.sources.zakup_sk.bundle_cache import (
     ZakupBundleCache,
 )
@@ -103,6 +107,351 @@ def _entity_types(value: str, source: Source) -> list[EntityType]:
     if source == Source.EEP_MITWORK:
         result.append(EntityType.PLAN_ITEM)
     return result
+
+
+def _profile_list(value: str | None, fallback: str) -> list[str]:
+    if not value:
+        return [fallback]
+    result = list(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    if not result:
+        raise typer.BadParameter("Profile list cannot be empty")
+    return result
+
+
+def _progress(message: str, *, enabled: bool) -> None:
+    if enabled:
+        typer.echo(f"[catalog-stats] {message}", err=True)
+
+
+def _render_json_result(document: dict[str, Any], output: Path | None = None) -> str:
+    payload = json.dumps(document, ensure_ascii=False, indent=2)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(f"{output.suffix}.tmp")
+        temporary.write_text(f"{payload}\n", encoding="utf-8")
+        temporary.replace(output)
+    return payload
+
+
+async def _await_with_progress(
+    awaitable: Awaitable,
+    *,
+    label: str,
+    enabled: bool,
+    interval_seconds: int,
+    timeout_seconds: int | None = None,
+):
+    started = time.monotonic()
+    _progress(f"START {label}", enabled=enabled)
+    task = asyncio.create_task(awaitable)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=interval_seconds)
+        elapsed = time.monotonic() - started
+        if not done:
+            _progress(
+                f"WAIT  {label} elapsed={elapsed:.1f}s",
+                enabled=enabled,
+            )
+            if timeout_seconds is not None and elapsed >= timeout_seconds:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                error = TimeoutError(
+                    f"Probe exceeded {timeout_seconds} seconds"
+                )
+                _progress(
+                    f"FAIL  {label} elapsed={elapsed:.1f}s error={error}",
+                    enabled=enabled,
+                )
+                raise error
+            continue
+        try:
+            result = task.result()
+        except Exception as exc:
+            _progress(
+                f"FAIL  {label} elapsed={elapsed:.1f}s "
+                f"error={type(exc).__name__}: {exc}",
+                enabled=enabled,
+            )
+            raise
+        _progress(
+            f"DONE  {label} elapsed={elapsed:.1f}s",
+            enabled=enabled,
+        )
+        return result
+
+
+def _duration_parts(seconds: float | None) -> dict | None:
+    if seconds is None:
+        return None
+    rounded = round(seconds, 1)
+    return {
+        "seconds": rounded,
+        "hours": round(rounded / 3600, 2),
+        "days": round(rounded / 86400, 2),
+    }
+
+
+def _full_run_forecasts(results: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str, str], list[dict]] = {}
+    for item in results:
+        key_values = (
+            item.get("source"),
+            item.get("runtime"),
+            item.get("network"),
+        )
+        if not all(isinstance(value, str) for value in key_values):
+            continue
+        grouped.setdefault(key_values, []).append(item)
+
+    forecasts = []
+    for (source, runtime, network), items in grouped.items():
+        usable = [
+            item
+            for item in items
+            if isinstance(item.get("estimated_discovery_seconds"), (int, float))
+            and isinstance(
+                (item.get("worker_probe") or {}).get("estimated_detail_seconds"),
+                (int, float),
+            )
+        ]
+        discovery_seconds = sum(
+            item["estimated_discovery_seconds"] for item in usable
+        )
+        detail_seconds = sum(
+            item["worker_probe"]["estimated_detail_seconds"] for item in usable
+        )
+        forecasts.append(
+            {
+                "source": source,
+                "runtime": runtime,
+                "network": network,
+                "complete": len(usable) == len(items) and bool(items),
+                "catalogs_measured": len(usable),
+                "catalogs_expected": len(items),
+                "discovery": _duration_parts(discovery_seconds if usable else None),
+                "detail": _duration_parts(detail_seconds if usable else None),
+                "full_cycle": _duration_parts(
+                    discovery_seconds + detail_seconds if usable else None
+                ),
+            }
+        )
+    return forecasts
+
+
+def _combined_forecasts(forecasts: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for item in forecasts:
+        grouped.setdefault((item["runtime"], item["network"]), []).append(item)
+
+    combined = []
+    for (runtime, network), items in grouped.items():
+        durations = [
+            item["full_cycle"]["seconds"]
+            for item in items
+            if item["complete"] and item["full_cycle"] is not None
+        ]
+        combined.append(
+            {
+                "runtime": runtime,
+                "network": network,
+                "complete": len(durations) == len(items) and bool(items),
+                "sources_measured": len(durations),
+                "sources_expected": len(items),
+                "parallel_wall_clock": _duration_parts(
+                    max(durations) if durations else None
+                ),
+                "sequential_total": _duration_parts(
+                    sum(durations) if durations else None
+                ),
+            }
+        )
+    return combined
+
+
+def _catalog_stats_summary(
+    results: list[dict],
+    forecasts: list[dict],
+    combined_forecasts: list[dict],
+    totals_by_source: dict[str, int],
+) -> dict:
+    worker_probes = [
+        item["worker_probe"]
+        for item in results
+        if isinstance(item.get("worker_probe"), dict)
+    ]
+    requested = sum(item.get("requested", 0) for item in worker_probes)
+    succeeded = sum(item.get("succeeded", 0) for item in worker_probes)
+    complete_combined = [
+        item
+        for item in combined_forecasts
+        if item.get("complete") and item.get("parallel_wall_clock")
+    ]
+    ranked = sorted(
+        complete_combined,
+        key=lambda item: item["parallel_wall_clock"]["seconds"],
+    )
+    fastest = ranked[0] if ranked else None
+    slowest = ranked[-1] if ranked else None
+    per_source = {}
+    for source in totals_by_source:
+        candidates = [
+            item
+            for item in forecasts
+            if item.get("source") == source
+            and item.get("complete")
+            and item.get("full_cycle")
+        ]
+        if candidates:
+            best = min(
+                candidates,
+                key=lambda item: item["full_cycle"]["seconds"],
+            )
+            per_source[source] = {
+                "catalog_entries": totals_by_source[source],
+                "fastest_measured_profile": {
+                    "runtime": best["runtime"],
+                    "network": best["network"],
+                },
+                "estimated_full_cycle": best["full_cycle"],
+            }
+        else:
+            per_source[source] = {
+                "catalog_entries": totals_by_source[source],
+                "fastest_measured_profile": None,
+                "estimated_full_cycle": None,
+            }
+
+    return {
+        "status": (
+            "complete"
+            if complete_combined
+            and all(item.get("complete") for item in combined_forecasts)
+            else "partial"
+        ),
+        "workload": {
+            "catalog_entries_total": sum(totals_by_source.values()),
+            "by_source": per_source,
+        },
+        "sample_quality": {
+            "catalog_measurements": len(results),
+            "worker_details_requested": requested,
+            "worker_details_succeeded": succeeded,
+            "worker_success_rate": (
+                round(succeeded / requested, 4) if requested else None
+            ),
+            "confidence": "low",
+            "reason": (
+                "The estimate extrapolates a small live sample and excludes "
+                "retries, PostgreSQL writes, refreshes and reconciliation."
+            ),
+        },
+        "time_estimate_for_both_sources": {
+            "fastest_measured_profile": (
+                {
+                    "runtime": fastest["runtime"],
+                    "network": fastest["network"],
+                }
+                if fastest
+                else None
+            ),
+            "parallel_wall_clock": (
+                fastest["parallel_wall_clock"] if fastest else None
+            ),
+            "sequential_total": fastest["sequential_total"] if fastest else None,
+            "measured_range_parallel": {
+                "minimum": fastest["parallel_wall_clock"] if fastest else None,
+                "maximum": slowest["parallel_wall_clock"] if slowest else None,
+            },
+        },
+        "plain_text": (
+            f"Measured {sum(totals_by_source.values()):,} catalog entries. "
+            f"Worker probes succeeded {succeeded}/{requested}. "
+            + (
+                "The fastest measured full run of both sources in parallel is "
+                f"about {fastest['parallel_wall_clock']['days']} days using "
+                f"{fastest['runtime']} + {fastest['network']}. "
+                f"The measured parallel range is "
+                f"{fastest['parallel_wall_clock']['days']}-"
+                f"{slowest['parallel_wall_clock']['days']} days. "
+                "Treat this as a low-confidence benchmark, not an SLA."
+                if fastest and slowest
+                else "A complete full-run estimate is unavailable."
+            )
+        ),
+    }
+
+
+async def _detail_probe(
+    adapter,
+    identities,
+    *,
+    limit: int,
+    concurrency: int,
+    progress_enabled: bool = False,
+    progress_interval_seconds: int = 10,
+    probe_timeout_seconds: int | None = None,
+) -> dict:
+    selected = identities[:limit]
+    if not selected:
+        return {
+            "requested": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "elapsed_seconds": 0.0,
+            "details_per_second": None,
+            "items": [],
+        }
+
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def extract(index, identity):
+        async with semaphore:
+            started = time.monotonic()
+            try:
+                batch = await _await_with_progress(
+                    adapter.extract(identity),
+                    label=(
+                        f"worker {index}/{len(selected)} "
+                        f"{identity.entity_type.value}:{identity.source_entity_id}"
+                    ),
+                    enabled=progress_enabled,
+                    interval_seconds=progress_interval_seconds,
+                    timeout_seconds=probe_timeout_seconds,
+                )
+            except Exception as exc:
+                return {
+                    "source_entity_id": identity.source_entity_id,
+                    "success": False,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            return {
+                "source_entity_id": identity.source_entity_id,
+                "success": True,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "entities": len(batch.entities),
+                "relations": len(batch.relations),
+                "discovered": len(batch.discovered),
+            }
+
+    started = time.monotonic()
+    items = await asyncio.gather(
+        *(
+            extract(index, identity)
+            for index, identity in enumerate(selected, start=1)
+        )
+    )
+    elapsed = time.monotonic() - started
+    succeeded = sum(1 for item in items if item["success"])
+    return {
+        "requested": len(selected),
+        "succeeded": succeeded,
+        "failed": len(selected) - succeeded,
+        "concurrency": max(1, concurrency),
+        "elapsed_seconds": round(elapsed, 3),
+        "details_per_second": round(succeeded / elapsed, 3) if elapsed else None,
+        "items": items,
+    }
 
 
 def _settings(
@@ -590,6 +939,278 @@ def validate_export(
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
     if not result["valid"]:
         raise typer.Exit(code=1)
+
+
+@app.command("catalog-stats")
+def catalog_stats(
+    source: Annotated[str, typer.Option()] = "all",
+    samples: Annotated[int, typer.Option(min=1, max=10)] = 1,
+    worker_samples: Annotated[int, typer.Option(min=0, max=20)] = 0,
+    runtime: Annotated[str, typer.Option()] = "local",
+    network: Annotated[str, typer.Option()] = "direct",
+    runtime_profiles: Annotated[str | None, typer.Option()] = None,
+    network_profiles: Annotated[str | None, typer.Option()] = None,
+    eep_network: Annotated[str | None, typer.Option()] = None,
+    zakup_network: Annotated[str | None, typer.Option()] = None,
+    captcha: Annotated[str, typer.Option()] = "disabled",
+    progress: Annotated[bool, typer.Option()] = True,
+    progress_interval_seconds: Annotated[
+        int,
+        typer.Option(min=1, max=300),
+    ] = 10,
+    probe_timeout_seconds: Annotated[
+        int,
+        typer.Option(min=10, max=3600),
+    ] = 600,
+    output: Annotated[
+        Path | None,
+        typer.Option(help="Save the complete JSON report to this file."),
+    ] = None,
+) -> None:
+    async def execute() -> None:
+        configure_logging("WARNING", log_to_file=False)
+        results = []
+        _progress(
+            f"matrix sources={source} samples={samples} "
+            f"worker_samples={worker_samples} "
+            f"runtime={runtime_profiles or runtime} "
+            f"network={network_profiles or network}",
+            enabled=progress,
+        )
+        for current_source in _sources(source):
+            default_network = _network_for_source(
+                current_source,
+                network=network,
+                eep_network=eep_network,
+                zakup_network=zakup_network,
+            )
+            for current_runtime in _profile_list(runtime_profiles, runtime):
+                for current_network in _profile_list(
+                    network_profiles,
+                    default_network,
+                ):
+                    combination = (
+                        f"source={current_source.value} "
+                        f"runtime={current_runtime} network={current_network}"
+                    )
+                    _progress(f"CONFIG {combination}", enabled=progress)
+                    try:
+                        settings = load_settings(
+                            source=current_source,
+                            runtime_profile=current_runtime,
+                            network_profile=current_network,
+                            captcha_profile=(
+                                captcha
+                                if current_source == Source.ZAKUP_SK
+                                else "disabled"
+                            ),
+                        )
+                    except Exception as exc:
+                        _progress(
+                            f"SKIP  {combination} error={type(exc).__name__}: {exc}",
+                            enabled=progress,
+                        )
+                        results.append(
+                            {
+                                "source": current_source.value,
+                                "runtime": current_runtime,
+                                "network": current_network,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        continue
+                    if (
+                        settings.network.kind != "direct"
+                        and not settings.network.proxy_url
+                        and not settings.network.proxy_pool_urls
+                    ):
+                        _progress(
+                            f"SKIP  {combination} no proxy configured",
+                            enabled=progress,
+                        )
+                        results.append(
+                            {
+                                "source": current_source.value,
+                                "runtime": current_runtime,
+                                "network": current_network,
+                                "error": (
+                                    "Network profile has no PROXY_URL or usable "
+                                    "proxy pool"
+                                ),
+                            }
+                        )
+                        continue
+                    solver = build_captcha_solver(settings.captcha, None)
+                    adapter = (
+                        EepMitworkAdapter(settings.source, settings.network)
+                        if current_source == Source.EEP_MITWORK
+                        else ZakupSkAdapter(
+                            settings.source,
+                            settings.network,
+                            settings.captcha,
+                            solver,
+                            settings.runtime,
+                        )
+                    )
+                    entity_types = (
+                        [EntityType.LOT, EntityType.PLAN_ITEM]
+                        if current_source == Source.EEP_MITWORK
+                        else [EntityType.LOT, EntityType.NOTICE]
+                    )
+                    try:
+                        for current_type in entity_types:
+                            catalog_label = (
+                                f"{combination} catalog={current_type.value} "
+                                f"list_pages={samples}"
+                            )
+                            try:
+                                probe = await _await_with_progress(
+                                    adapter.probe_catalog(
+                                        current_type,
+                                        samples=samples,
+                                    ),
+                                    label=catalog_label,
+                                    enabled=progress,
+                                    interval_seconds=progress_interval_seconds,
+                                    timeout_seconds=probe_timeout_seconds,
+                                )
+                            except Exception as exc:
+                                results.append(
+                                    {
+                                        "source": current_source.value,
+                                        "entity_type": current_type.value,
+                                        "runtime": current_runtime,
+                                        "network": current_network,
+                                        "error": f"{type(exc).__name__}: {exc}",
+                                    }
+                                )
+                                continue
+                            identities = probe.pop("sample_identities")
+                            elapsed = probe["elapsed_seconds"]
+                            rate = probe["returned"] / elapsed if elapsed else None
+                            estimated = (
+                                probe["total"] / rate
+                                if probe["total"] is not None and rate
+                                else None
+                            )
+                            detail_result = (
+                                await _detail_probe(
+                                    adapter,
+                                    identities,
+                                    limit=worker_samples,
+                                    concurrency=min(
+                                        worker_samples,
+                                        settings.runtime.worker_count,
+                                    ),
+                                    progress_enabled=progress,
+                                    progress_interval_seconds=(
+                                        progress_interval_seconds
+                                    ),
+                                    probe_timeout_seconds=probe_timeout_seconds,
+                                )
+                                if worker_samples
+                                else None
+                            )
+                            if (
+                                detail_result
+                                and detail_result["details_per_second"]
+                                and probe["total"] is not None
+                            ):
+                                detail_result["estimated_detail_seconds"] = round(
+                                    probe["total"]
+                                    / detail_result["details_per_second"],
+                                    1,
+                                )
+                            results.append(
+                                {
+                                    "source": current_source.value,
+                                    "entity_type": current_type.value,
+                                    "runtime": current_runtime,
+                                    "network": current_network,
+                                    "runtime_settings": {
+                                        "worker_count": settings.runtime.worker_count,
+                                        "browser_lanes": settings.runtime.browser_lanes,
+                                        "claim_batch_size": (
+                                            settings.runtime.claim_batch_size
+                                        ),
+                                        "browser_timeout_seconds": (
+                                            settings.runtime.browser_response_timeout_seconds
+                                        ),
+                                    },
+                                    "network_settings": {
+                                        "kind": settings.network.kind,
+                                        "max_lanes": settings.network.max_lanes,
+                                        "configured_proxies": len(
+                                            settings.network.proxy_pool_urls
+                                        )
+                                        + int(settings.network.proxy_url is not None),
+                                    },
+                                    "scope": "default_catalog_filter",
+                                    **probe,
+                                    "list_items_per_second": (
+                                        round(rate, 2) if rate else None
+                                    ),
+                                    "estimated_discovery_seconds": (
+                                        round(estimated, 1)
+                                        if estimated is not None
+                                        else None
+                                    ),
+                                    "worker_probe": detail_result,
+                                }
+                            )
+                    finally:
+                        await adapter.close()
+                        close = getattr(solver, "close", None)
+                        if close:
+                            await close()
+        totals_by_source = {}
+        for current_source in _sources(source):
+            totals_by_type = {}
+            for item in results:
+                if (
+                    item.get("source") == current_source.value
+                    and isinstance(item.get("total"), int)
+                ):
+                    entity_type = item["entity_type"]
+                    totals_by_type[entity_type] = max(
+                        item["total"],
+                        totals_by_type.get(entity_type, 0),
+                    )
+            totals_by_source[current_source.value] = sum(totals_by_type.values())
+        forecasts = _full_run_forecasts(results)
+        combined_forecasts = _combined_forecasts(forecasts)
+        summary = _catalog_stats_summary(
+            results,
+            forecasts,
+            combined_forecasts,
+            totals_by_source,
+        )
+        document = {
+            "measured_at_unix": round(time.time()),
+            "catalog_entries_by_source": totals_by_source,
+            "catalog_entries_total": sum(totals_by_source.values()),
+            "results": results,
+            "full_run_forecasts": forecasts,
+            "combined_forecasts": combined_forecasts,
+            "note": (
+                "Counts use each portal's default catalog filter and are not a "
+                "guaranteed all-status historical total. Speed measures catalog "
+                "discovery. worker_probe performs extract/parse/relations without "
+                "writing to PostgreSQL. Full-cycle forecasts add discovery and "
+                "detail estimates; they remain approximate and exclude queue, "
+                "UPSERT, retries, refresh passes and relation deduplication cost."
+            ),
+            "summary": summary,
+        }
+        payload = _render_json_result(document, output)
+        if output is not None:
+            _progress(
+                f"Saved complete report to {output.resolve()}",
+                enabled=progress,
+            )
+        typer.echo(payload)
+
+    asyncio.run(execute())
 
 
 @app.command("zakup-spike")

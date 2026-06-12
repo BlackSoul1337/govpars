@@ -35,7 +35,9 @@ build/
 
 # Runtime state and generated data
 logs/
+export/
 exports/
+reports/
 playwright/.auth/
 playwright/.cache/
 playwright/**/auth/
@@ -56,6 +58,7 @@ proxies.json
 spys*.txt
 config/proxy_pools/*
 !config/proxy_pools/public_pool.example.json
+!config/proxy_pools/public_working.json
 
 # Editors and operating systems
 .idea/

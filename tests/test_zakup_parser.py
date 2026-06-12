@@ -27,6 +27,29 @@ def test_zakup_lot_preserves_payload_and_children() -> None:
     assert batch.discovered[0].identity.source_entity_id == "1227366"
 
 
+def test_zakup_preserves_long_source_text_fields() -> None:
+    long_delivery_condition = "товар доставляется перевозчиком заказчика " * 10
+    long_phone = "+7 723 229-8215 по технической спецификации " * 10
+    payload = {
+        "id": 4453353,
+        "number": "4453353",
+        "nameRu": "Тестовый лот",
+        "deliveryPlaces": [
+            {
+                "address": "г. Атырау",
+                "deliveryCondition": long_delivery_condition,
+            }
+        ],
+        "phone": long_phone,
+    }
+
+    batch = parse_detail(payload, EntityType.LOT, source_entity_id="4453353")
+    lot = batch.entities[0].entity
+
+    assert lot.contact_phone == long_phone
+    assert lot.delivery_places[0].incoterms == long_delivery_condition
+
+
 def test_zakup_uses_nested_address_and_goods_attributes() -> None:
     payload = {
         "id": 10,

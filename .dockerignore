@@ -29,6 +29,7 @@ config/**/*.local.toml
 config/**/*.private.toml
 exports
 logs
+reports
 playwright
 tests
 *.log
@@ -45,3 +46,4 @@ proxies.json
 spys*.txt
 config/proxy_pools/*
 !config/proxy_pools/public_pool.example.json
+!config/proxy_pools/public_working.json
