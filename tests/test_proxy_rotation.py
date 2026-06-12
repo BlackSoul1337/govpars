@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from pathlib import Path
@@ -366,8 +367,9 @@ def test_logging_writes_rotating_jsonl_file(tmp_path) -> None:
         handler.flush()
 
     content = (tmp_path / "worker.jsonl").read_text(encoding="utf-8")
-    assert '"event": "test_file_log"' in content
-    assert '"task_id": 42' in content
+    payload = json.loads(content)
+    assert payload["event"] == "test_file_log"
+    assert payload["task_id"] == 42
 
 
 def test_logging_serializes_exception_details(tmp_path) -> None:
