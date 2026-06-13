@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from procurement_parser.domain.csv_safety import escape_spreadsheet_formula
 from procurement_parser.infrastructure.persistence.postgres.database import Database
 
 ALLOWED_EXPORTS = {
@@ -46,8 +50,12 @@ PROCUREMENT_EXPORT_COLUMNS = (
     "total_amount",
     "currency",
     "published_at",
+    "published_at_local",
     "application_start_at",
+    "application_start_at_local",
     "application_end_at",
+    "application_end_at_local",
+    "source_timezone",
     "delivery_terms_ru",
     "delivery_terms_kk",
     "delivery_conditions_ru",
@@ -141,6 +149,7 @@ EXPORT_SOURCE_COLUMNS = {
     "documents": "source",
 }
 EXPORT_SOURCES = ("eep-mitwork", "zakup-sk")
+type ExportRequest = tuple[str, str, Path, str | None]
 
 
 class PostgresCsvExporter:
@@ -149,11 +158,13 @@ class PostgresCsvExporter:
         database: Database,
         *,
         delimiter: str = ",",
+        excel_safe: bool = True,
     ) -> None:
         if delimiter not in {",", ";"}:
             raise ValueError("CSV delimiter must be comma or semicolon")
         self.database = database
         self.delimiter = delimiter
+        self.excel_safe = excel_safe
 
     async def export(
         self,
@@ -162,79 +173,215 @@ class PostgresCsvExporter:
         *,
         source: str | None = None,
     ) -> int:
+        results = await self._export_requests(
+            [("result", view_name, destination, source)]
+        )
+        return results["result"]
+
+    async def _export_requests(
+        self,
+        requests: list[ExportRequest],
+    ) -> dict[str, int]:
+        for _, view_name, destination, source in requests:
+            self._validate_request(view_name, source)
+            await asyncio.to_thread(
+                destination.parent.mkdir,
+                parents=True,
+                exist_ok=True,
+            )
+
+        copied: list[tuple[Path, Path]] = []
+        results: dict[str, int] = {}
+        try:
+            async with self.database.engine.connect() as connection:
+                async with connection.begin():
+                    await connection.execute(
+                        text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    )
+                    for key, view_name, destination, source in requests:
+                        count, temporary = await self._copy_export(
+                            connection,
+                            view_name,
+                            destination,
+                            source=source,
+                        )
+                        copied.append((temporary, destination))
+                        results[key] = count
+            for temporary, destination in copied:
+                await asyncio.to_thread(
+                    _write_csv,
+                    temporary,
+                    destination,
+                    delimiter=self.delimiter,
+                    excel_safe=self.excel_safe,
+                )
+            return results
+        finally:
+            for temporary, _ in copied:
+                if temporary.exists():
+                    await asyncio.to_thread(temporary.unlink)
+
+    @staticmethod
+    def _validate_request(view_name: str, source: str | None) -> None:
         relation = ALLOWED_EXPORTS.get(view_name)
         if relation is None:
             raise ValueError(f"Unsupported export: {view_name}")
         if source is not None and source not in EXPORT_SOURCES:
             raise ValueError(f"Unsupported source: {source}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
 
+    async def _copy_export(
+        self,
+        connection: AsyncConnection,
+        view_name: str,
+        destination: Path,
+        *,
+        source: str | None,
+    ) -> tuple[int, Path]:
+        relation = ALLOWED_EXPORTS[view_name]
         where_clause = ""
         if source:
             source_column = EXPORT_SOURCE_COLUMNS[view_name]
             where_clause = f' WHERE "{source_column}" = \'{source}\''
         columns = ", ".join(f'"{column}"' for column in EXPORT_COLUMNS[view_name])
         query = f'SELECT {columns} FROM "{relation}"{where_clause}'
-        temporary = destination.with_suffix(f"{destination.suffix}.tmp")
-        async with self.database.engine.connect() as connection:
-            count = int(
-                (
-                    await connection.execute(
-                        text(f'SELECT count(*) FROM "{relation}"{where_clause}')
+        temporary = destination.with_name(
+            f".{destination.name}.{uuid4().hex}.copy.tmp"
+        )
+        count = int(
+            (
+                await connection.execute(
+                    text(
+                        f'SELECT count(*) FROM "{relation}"'
+                        f"{where_clause}"
                     )
-                ).scalar_one()
-            )
-            raw = await connection.get_raw_connection()
-            driver = raw.driver_connection
-            await driver.copy_from_query(
-                query,
-                output=str(temporary),
-                format="csv",
-                header=True,
-                delimiter=self.delimiter,
-            )
-        await asyncio.to_thread(_write_utf8_bom, temporary, destination)
-        return count
+                )
+            ).scalar_one()
+        )
+        raw = await connection.get_raw_connection()
+        driver = raw.driver_connection
+        await driver.copy_from_query(
+            query,
+            output=str(temporary),
+            format="csv",
+            header=True,
+            delimiter=self.delimiter,
+        )
+        return count, temporary
 
     async def export_all(self, destination: Path) -> dict[str, int]:
-        await asyncio.to_thread(destination.mkdir, parents=True, exist_ok=True)
-        results: dict[str, int] = {}
-        for dataset in ALLOWED_EXPORTS:
-            results[dataset] = await self.export(
-                dataset,
-                destination / f"{dataset}.csv",
-            )
-        return results
+        return await self._export_requests(
+            [
+                (dataset, dataset, destination / f"{dataset}.csv", None)
+                for dataset in ALLOWED_EXPORTS
+            ]
+        )
 
     async def export_split(
         self,
         view_name: str,
         destination: Path,
     ) -> dict[str, int]:
-        await asyncio.to_thread(destination.mkdir, parents=True, exist_ok=True)
-        results: dict[str, int] = {}
-        for source in EXPORT_SOURCES:
-            source_slug = source.replace("-", "_")
-            filename = f"{view_name}_{source_slug}.csv"
-            results[source] = await self.export(
-                view_name,
-                destination / filename,
-                source=source,
-            )
-        return results
+        return await self._export_requests(
+            [
+                (
+                    source,
+                    view_name,
+                    destination / f"{view_name}_{source.replace('-', '_')}.csv",
+                    source,
+                )
+                for source in EXPORT_SOURCES
+            ]
+        )
 
     async def export_all_split(self, destination: Path) -> dict[str, int]:
-        await asyncio.to_thread(destination.mkdir, parents=True, exist_ok=True)
-        results: dict[str, int] = {}
-        for dataset in ALLOWED_EXPORTS:
-            source_results = await self.export_split(dataset, destination)
-            for source, count in source_results.items():
-                results[f"{dataset}:{source}"] = count
-        return results
+        return await self._export_requests(
+            [
+                (
+                    f"{dataset}:{source}",
+                    dataset,
+                    destination
+                    / f"{dataset}_{source.replace('-', '_')}.csv",
+                    source,
+                )
+                for dataset in ALLOWED_EXPORTS
+                for source in EXPORT_SOURCES
+            ]
+        )
+
+    async def export_all_both(self, destination: Path) -> dict[str, int]:
+        return await self._export_requests(
+            [
+                (
+                    f"combined:{dataset}",
+                    dataset,
+                    destination / f"{dataset}.csv",
+                    None,
+                )
+                for dataset in ALLOWED_EXPORTS
+            ]
+            + [
+                (
+                    f"split:{dataset}:{source}",
+                    dataset,
+                    destination
+                    / f"{dataset}_{source.replace('-', '_')}.csv",
+                    source,
+                )
+                for dataset in ALLOWED_EXPORTS
+                for source in EXPORT_SOURCES
+            ]
+        )
+
+    async def export_both(
+        self,
+        view_name: str,
+        destination: Path,
+        split_destination: Path,
+    ) -> dict[str, int]:
+        return await self._export_requests(
+            [
+                ("combined", view_name, destination, None),
+                *[
+                    (
+                        f"split:{source}",
+                        view_name,
+                        split_destination
+                        / f"{view_name}_{source.replace('-', '_')}.csv",
+                        source,
+                    )
+                    for source in EXPORT_SOURCES
+                ],
+            ]
+        )
 
 
-def _write_utf8_bom(source: Path, destination: Path) -> None:
-    with source.open("rb") as source_file, destination.open("wb") as destination_file:
-        destination_file.write(b"\xef\xbb\xbf")
-        shutil.copyfileobj(source_file, destination_file)
-    source.unlink()
+def _write_csv(
+    source: Path,
+    destination: Path,
+    *,
+    delimiter: str,
+    excel_safe: bool,
+) -> None:
+    output = destination.with_name(
+        f".{destination.name}.{uuid4().hex}.write.tmp"
+    )
+    try:
+        if excel_safe:
+            with (
+                source.open("r", encoding="utf-8", newline="") as source_file,
+                output.open("w", encoding="utf-8-sig", newline="") as output_file,
+            ):
+                reader = csv.reader(source_file, delimiter=delimiter)
+                writer = csv.writer(output_file, delimiter=delimiter)
+                for row in reader:
+                    writer.writerow(
+                        [escape_spreadsheet_formula(value) for value in row]
+                    )
+        else:
+            with source.open("rb") as source_file, output.open("wb") as output_file:
+                output_file.write(b"\xef\xbb\xbf")
+                shutil.copyfileobj(source_file, output_file)
+        output.replace(destination)
+    finally:
+        source.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)

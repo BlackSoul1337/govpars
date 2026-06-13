@@ -48,3 +48,4 @@ spys*.txt
 config/proxy_pools/*
 !config/proxy_pools/public_pool.example.json
 !config/proxy_pools/public_working.json
+.tmp_spreadsheet

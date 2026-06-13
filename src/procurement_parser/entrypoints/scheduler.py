@@ -6,13 +6,13 @@ from dataclasses import dataclass
 
 import structlog
 
-from procurement_parser.application.factory import build_context
 from procurement_parser.application.pipeline import DiscoveryService
 from procurement_parser.config.settings import (
     configure_discovery_concurrency,
     load_settings,
 )
 from procurement_parser.domain.models import EntityType, Source
+from procurement_parser.entrypoints.runtime import build_context
 from procurement_parser.infrastructure.persistence.postgres.database import Database
 from procurement_parser.infrastructure.persistence.postgres.maintenance import (
     PostgresMaintenance,

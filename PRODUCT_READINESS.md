@@ -98,7 +98,7 @@ Live acceptance и 10k pilot должны выполняться в отдель
 
 | Требование | Статус | Комментарий |
 |---|---|---|
-| Clean Architecture Lite | готово | Domain/application больше не зависят от source-specific exceptions |
+| Clean Architecture Lite | готово | Domain/application не импортируют infrastructure/entrypoints; граница проверяется AST-тестом |
 | Vertical source slices | готово | EEP и Zakup изолированы |
 | Strategy + durable ETL | готово | Discovery, queue, extraction, persistence, relations, reconciliation |
 | PostgreSQL SSOT | готово | Очередь, entities, revisions, runtime state, scheduler |
@@ -122,8 +122,8 @@ Live acceptance и 10k pilot должны выполняться в отдель
 | Scheduler policies | готово | durable source-specific jobs |
 | Weekly reconciliation | готово | full discovery + refresh |
 | Prometheus без FastAPI | готово | embedded HTTP server + DB sampler |
-| CSV combined/split/both | готово | 8 datasets |
-| UTF-8 CSV validation | готово | BOM/U+FFFD/header/identity/counts |
+| CSV combined/split/both | готово | 8 datasets, единый snapshot на запуск, атомарная публикация |
+| UTF-8/Excel-safe CSV | готово | BOM/U+FFFD/header/identity/counts/row width/formula-like cells |
 | Hash-aware revisions | готово | changes/off |
 | COPY staging contract | готово | one connection/transaction test |
 | Clean migration 0001 | готово | metadata import удалён |

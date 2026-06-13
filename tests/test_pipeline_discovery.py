@@ -5,6 +5,7 @@ import pytest
 from procurement_parser.application.pipeline import (
     DiscoveryService,
     classify_discovery_window,
+    gather_fail_fast,
 )
 from procurement_parser.domain.models import (
     DiscoveredEntity,
@@ -91,6 +92,28 @@ class FakeDiscoveryFrontier:
             return len(items)
         finally:
             self.active_enqueues -= 1
+
+
+async def test_gather_fail_fast_cancels_sibling_on_error() -> None:
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def fail():
+        await sibling_started.wait()
+        raise RuntimeError("discovery failed")
+
+    async def wait_forever():
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    with pytest.raises(RuntimeError, match="discovery failed"):
+        await gather_fail_fast([fail(), wait_forever()])
+
+    assert sibling_cancelled.is_set()
 
 
 async def test_discovery_walks_windows_and_completes_checkpoint() -> None:

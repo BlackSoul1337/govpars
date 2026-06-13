@@ -1,8 +1,14 @@
 from pathlib import Path
 
+import pytest
+
 from procurement_parser.application.csv_validator import (
     validate_csv,
     validate_export_directory,
+)
+from procurement_parser.domain.csv_safety import (
+    escape_spreadsheet_formula,
+    is_spreadsheet_formula,
 )
 
 
@@ -64,3 +70,48 @@ def test_csv_validator_accepts_excel_semicolon_delimiter(tmp_path) -> None:
     assert result["rows"] == 1
     assert result["columns"] == 3
     assert result["delimiter"] == ";"
+
+
+def test_csv_validator_rejects_malformed_row_width(tmp_path) -> None:
+    path = tmp_path / "lots.csv"
+    _write(
+        path,
+        "source,source_entity_id,title_ru\r\n"
+        "eep-mitwork,1,title,unexpected\r\n",
+    )
+
+    result = validate_csv(path)
+
+    assert result["valid"] is False
+    assert result["malformed_rows"] == 1
+
+
+def test_csv_validator_rejects_spreadsheet_formula_like_cells(tmp_path) -> None:
+    path = tmp_path / "lots.csv"
+    _write(
+        path,
+        "source,source_entity_id,title_ru\r\n"
+        'eep-mitwork,1,"=HYPERLINK(""https://example.test"")"\r\n',
+    )
+
+    result = validate_csv(path)
+
+    assert result["valid"] is False
+    assert result["formula_like_cells"] == 1
+
+
+@pytest.mark.parametrize(
+    ("value", "formula_like"),
+    [
+        ("=1+1", True),
+        (" +7 (717) 000-00-00", True),
+        ("@SUM(A1:A2)", True),
+        ("- command", True),
+        ("-123.45", False),
+        ("ordinary text", False),
+    ],
+)
+def test_spreadsheet_formula_detection(value, formula_like) -> None:
+    assert is_spreadsheet_formula(value) is formula_like
+    escaped = escape_spreadsheet_formula(value)
+    assert escaped.startswith("'") is formula_like

@@ -311,11 +311,25 @@ uv run procurement-parser export --dataset all `
   --output exports/all --layout both
 uv run procurement-parser export --dataset all `
   --output exports/excel --layout split --delimiter semicolon
+uv run procurement-parser export --dataset all `
+  --output exports/raw --layout split --raw-csv
 uv run procurement-parser validate-export --input exports/all
 ```
 
 CSV files use UTF-8 BOM. Validation checks headers, replacement characters,
-duplicate identities, and combined/split row counts.
+row width, spreadsheet formula-like values, duplicate identities, and
+combined/split row counts. Formula-like values beginning with `=`, `+`, `-`, or
+`@` are escaped by default for safe spreadsheet opening. Use `--raw-csv` only
+for controlled machine-to-machine processing. Every export writes
+`export_manifest.json` with generation time, mode, and per-file row counts.
+Procurement datasets retain canonical UTC columns (`published_at`,
+`application_start_at`, `application_end_at`) and also expose readable
+`published_at_local`, `application_start_at_local`, and
+`application_end_at_local` values for `source_timezone=Asia/Almaty`.
+All files produced by one `all`/`both` run use one PostgreSQL `REPEATABLE READ`
+snapshot. Each CSV and the manifest are published with an atomic replacement,
+so an interrupted export does not leave a truncated final file.
+
 Comma remains the standard delimiter. Use `--delimiter semicolon` for Excel
 installations whose regional settings expect semicolon-separated CSV.
 
@@ -327,6 +341,170 @@ uv run procurement-parser release-stale-leases
 uv run procurement-parser prune-history --retention-days 90
 docker compose exec postgres psql -U procurement -d procurement
 ```
+
+### Querying collected data
+
+Use the `export_*` views for queries and analytics. They already join internal
+`source_entity_fk` values to `source_entities` identities and match the CSV
+dataset structures.
+
+| View | Content |
+| --- | --- |
+| `export_lots` | lots |
+| `export_procurement_notices` | EEP `/buy` notices and Zakup `advert` notices |
+| `export_plan_items` | EEP `/point` plan items |
+| `export_organizations` | organizations |
+| `export_entity_relations` | directed entity relations |
+| `export_delivery_places` | delivery places |
+| `export_payment_terms` | payment terms |
+| `export_documents` | document metadata and URLs without file downloads |
+
+An entity is uniquely identified by
+`(source, entity_type, source_entity_id)`. `source_entity_id` is the page/API
+identifier, while `business_number` is the displayed procurement or lot
+number; they are not required to match. Internal `source_entities.id` values
+exist only for database foreign keys.
+
+Main relation types are `plan_to_notice`, `plan_to_lot`, `notice_to_lot`,
+`organizer`, and `customer`. Relations are directed from `parent_*` to
+`child_*`. A missing relation is valid: an EEP plan item may not have a notice
+yet, or a source link may point to a card that is no longer available.
+
+Count persisted entities:
+
+```sql
+SELECT source, entity_type, count(*)
+FROM source_entities
+WHERE last_success_at IS NOT NULL
+GROUP BY source, entity_type
+ORDER BY source, entity_type;
+```
+
+Find the 50 notices with the shortest application period:
+
+```sql
+SELECT
+    source,
+    source_entity_id,
+    title_ru,
+    application_start_at_local AS start_local,
+    application_end_at_local AS end_local,
+    application_end_at - application_start_at AS duration,
+    canonical_url
+FROM export_procurement_notices
+WHERE application_start_at IS NOT NULL
+  AND application_end_at IS NOT NULL
+  AND application_end_at > application_start_at
+ORDER BY duration
+LIMIT 50;
+```
+
+Retrieve lots belonging to one notice:
+
+```sql
+SELECT
+    n.source,
+    n.source_entity_id AS notice_id,
+    n.title_ru AS notice_title,
+    l.source_entity_id AS lot_id,
+    l.business_number AS lot_number,
+    l.title_ru AS lot_title,
+    l.total_amount,
+    l.currency,
+    l.canonical_url
+FROM export_procurement_notices n
+JOIN export_entity_relations r
+  ON r.parent_source = n.source
+ AND r.parent_type = 'notice'
+ AND r.parent_id = n.source_entity_id
+ AND r.relation_type = 'notice_to_lot'
+JOIN export_lots l
+  ON l.source = r.child_source
+ AND r.child_type = 'lot'
+ AND l.source_entity_id = r.child_id
+WHERE n.source = 'zakup-sk'
+  AND n.source_entity_id = '1229637'
+ORDER BY l.source_entity_id;
+```
+
+Retrieve complete EEP `plan → notice → lot` chains:
+
+```sql
+SELECT
+    p.source_entity_id AS plan_id,
+    p.title_ru AS plan_title,
+    n.source_entity_id AS notice_id,
+    n.title_ru AS notice_title,
+    l.source_entity_id AS lot_id,
+    l.title_ru AS lot_title
+FROM export_plan_items p
+JOIN export_entity_relations pn
+  ON pn.parent_source = p.source
+ AND pn.parent_type = 'plan_item'
+ AND pn.parent_id = p.source_entity_id
+ AND pn.relation_type = 'plan_to_notice'
+JOIN export_procurement_notices n
+  ON n.source = pn.child_source
+ AND pn.child_type = 'notice'
+ AND n.source_entity_id = pn.child_id
+JOIN export_entity_relations nl
+  ON nl.parent_source = n.source
+ AND nl.parent_type = 'notice'
+ AND nl.parent_id = n.source_entity_id
+ AND nl.relation_type = 'notice_to_lot'
+JOIN export_lots l
+  ON l.source = nl.child_source
+ AND nl.child_type = 'lot'
+ AND l.source_entity_id = nl.child_id
+WHERE p.source = 'eep-mitwork'
+ORDER BY p.source_entity_id::bigint
+LIMIT 100;
+```
+
+The `JOIN` clauses above return complete chains only. Query plan items that do
+not have a notice yet separately:
+
+```sql
+SELECT
+    p.source_entity_id AS plan_id,
+    p.title_ru,
+    p.status,
+    p.canonical_url
+FROM export_plan_items p
+WHERE p.source = 'eep-mitwork'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM export_entity_relations r
+      WHERE r.parent_source = p.source
+        AND r.parent_type = 'plan_item'
+        AND r.parent_id = p.source_entity_id
+        AND r.relation_type = 'plan_to_notice'
+  )
+ORDER BY p.source_entity_id::bigint
+LIMIT 100;
+```
+
+Retrieve lot documents or inspect source-specific JSON:
+
+```sql
+SELECT filename, category, extension, url, size_bytes
+FROM export_documents
+WHERE source = 'zakup-sk'
+  AND entity_type = 'lot'
+  AND source_entity_id = '4452106';
+
+SELECT
+    source_entity_id,
+    source_payload ->> 'status' AS raw_status,
+    jsonb_pretty(source_payload) AS raw_payload
+FROM export_lots
+WHERE source = 'zakup-sk'
+  AND source_entity_id = '4452106';
+```
+
+UTC columns remain canonical. Columns ending in `_local` are calculated for
+`source_timezone` and are intended for display and reporting. Use PostgreSQL
+JSONB operators such as `->`, `->>`, and `@>` for source-specific fields.
 
 Regular ingestion uses hash-aware UPSERT. Bulk replay keeps
 `CREATE TEMP → COPY → UPSERT` on one physical connection.

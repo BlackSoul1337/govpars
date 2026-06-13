@@ -25,7 +25,7 @@ domain
   models, errors, ports
        ↑
 application
-  discovery, workers, scheduler, export validation
+  discovery, workers, export validation
        ↑
 infrastructure
   sources/eep_mitwork
@@ -35,11 +35,13 @@ infrastructure
   captcha
        ↑
 entrypoints
-  Typer CLI
+  Typer CLI, scheduler, runtime composition
 ```
 
-Application зависит от domain contracts, но не от source-specific
-infrastructure exceptions. Wiring выполняется в factory.
+Application зависит от domain contracts и не импортирует infrastructure или
+entrypoints. Конкретные PostgreSQL repositories, source adapters и CAPTCHA
+providers собираются в `entrypoints/runtime.py`. Scheduler является driving
+entrypoint, поэтому находится рядом с CLI, а не внутри application.
 
 ## Почему не полный Hexagonal
 
@@ -59,7 +61,7 @@ CSV и runtime state.
 - session and WAF behavior.
 
 Изменение Zakup не должно затрагивать EEP. Новый источник добавляется отдельным
-модулем и регистрируется в factory/CLI.
+модулем и регистрируется в runtime composition/CLI.
 
 ## Домен
 

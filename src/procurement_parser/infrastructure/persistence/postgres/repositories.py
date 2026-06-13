@@ -212,7 +212,10 @@ class PostgresFrontierRepository(IdentityRepositoryMixin):
         async with self.database.sessions.begin() as session:
             frontier = (
                 await session.execute(
-                    select(CrawlFrontierRow).where(CrawlFrontierRow.id == task.id)
+                    select(CrawlFrontierRow).where(
+                        CrawlFrontierRow.id == task.id,
+                        CrawlFrontierRow.attempt == task.attempt,
+                    )
                 )
             ).scalar_one_or_none()
             if frontier is None:
@@ -276,6 +279,7 @@ class PostgresFrontierRepository(IdentityRepositoryMixin):
                 .where(
                     CrawlFrontierRow.id == task.id,
                     CrawlFrontierRow.lease_owner == worker_id,
+                    CrawlFrontierRow.attempt == task.attempt,
                 )
                 .values(
                     leased_until=text(
@@ -412,7 +416,10 @@ class PostgresFrontierRepository(IdentityRepositoryMixin):
             source_entity_fk = (
                 await session.execute(
                     CrawlFrontierRow.__table__.update()
-                    .where(CrawlFrontierRow.id == task.id)
+                    .where(
+                        CrawlFrontierRow.id == task.id,
+                        CrawlFrontierRow.attempt == task.attempt,
+                    )
                     .values(
                         lease_owner=None,
                         leased_until=None,
@@ -444,7 +451,10 @@ class PostgresFrontierRepository(IdentityRepositoryMixin):
         async with self.database.sessions.begin() as session:
             frontier = (
                 await session.execute(
-                    select(CrawlFrontierRow).where(CrawlFrontierRow.id == task.id)
+                    select(CrawlFrontierRow).where(
+                        CrawlFrontierRow.id == task.id,
+                        CrawlFrontierRow.attempt == task.attempt,
+                    )
                 )
             ).scalar_one_or_none()
             if frontier is None:

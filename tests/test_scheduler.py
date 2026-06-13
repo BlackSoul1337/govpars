@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from procurement_parser.application import scheduler
 from procurement_parser.domain.models import EntityType, Source
+from procurement_parser.entrypoints import scheduler
 
 
 class FakeAdapter:

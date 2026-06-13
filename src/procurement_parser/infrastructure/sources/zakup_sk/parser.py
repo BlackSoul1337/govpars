@@ -592,18 +592,21 @@ def parse_detail(
     )
     entities: list[EntityEnvelope] = []
     relations: list[EntityRelation] = []
+    related_entity_keys: set[str] = set()
     for item in (customer, organizer):
-        if item:
-            item_hash = hashlib.sha256(
-                orjson.dumps(item.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
-            ).hexdigest()
-            entities.append(
-                EntityEnvelope(
-                    entity=item,
-                    content_hash=item_hash,
-                    parser_version=PARSER_VERSION,
-                )
+        if not item or item.identity.stable_key in related_entity_keys:
+            continue
+        related_entity_keys.add(item.identity.stable_key)
+        item_hash = hashlib.sha256(
+            orjson.dumps(item.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
+        ).hexdigest()
+        entities.append(
+            EntityEnvelope(
+                entity=item,
+                content_hash=item_hash,
+                parser_version=PARSER_VERSION,
             )
+        )
     for related, relation_type in (
         (customer_identity, RelationType.CUSTOMER),
         (organizer_identity, RelationType.ORGANIZER),
