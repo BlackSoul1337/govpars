@@ -636,19 +636,74 @@ class ZakupSkAdapter:
             http_status=response.status,
         )
         if identity.entity_type == EntityType.NOTICE:
-            lots_response = await self._request(
+            await self._attach_notice_lots(batch, identity)
+        for envelope in batch.entities:
+            envelope.response_headers = response.headers
+        return batch
+
+    async def _attach_notice_lots(
+        self,
+        batch: ExtractedBatch,
+        identity: EntityIdentity,
+    ) -> None:
+        page = 0
+        page_size = 1000
+        seen_lot_ids: set[str] = set()
+
+        while True:
+            response = await self._request(
                 "GET",
                 (
                     f"{self.settings.base_url}{self.settings.endpoints.adverts}"
                     f"/lots/{identity.source_entity_id}"
                 ),
-                params={"page": 0, "size": 1000, "sort": "id,asc"},
+                params={"page": page, "size": page_size, "sort": "id,asc"},
             )
-            if lots_response.status < 400:
-                attach_notice_lots(batch, identity, lots_response.data)
-        for envelope in batch.entities:
-            envelope.response_headers = response.headers
-        return batch
+            self._ensure_success(response.status, response.strategy)
+
+            discovered_before = len(batch.discovered)
+            relations_before = len(batch.relations)
+            attach_notice_lots(batch, identity, response.data)
+
+            added = batch.discovered[discovered_before:]
+            page_ids = {
+                item.identity.source_entity_id
+                for item in added
+                if item.identity.entity_type == EntityType.LOT
+            }
+            duplicate_ids = page_ids & seen_lot_ids
+            if duplicate_ids:
+                batch.discovered[discovered_before:] = [
+                    item
+                    for item in added
+                    if item.identity.source_entity_id not in duplicate_ids
+                ]
+                batch.relations[relations_before:] = [
+                    relation
+                    for relation in batch.relations[relations_before:]
+                    if relation.child.source_entity_id not in duplicate_ids
+                ]
+
+            new_ids = page_ids - seen_lot_ids
+            seen_lot_ids.update(new_ids)
+            total = self._catalog_total(response.data)
+
+            if total is not None and len(seen_lot_ids) >= total:
+                return
+            if not added:
+                if total is None:
+                    raise RuntimeError(
+                        "Zakup notice lots response has no items or explicit total"
+                    )
+                raise RuntimeError(
+                    "Zakup notice lots pagination stopped before the reported total"
+                )
+            if not new_ids:
+                raise RuntimeError("Zakup notice lots pagination repeated the same page")
+            if total is None and len(added) < page_size:
+                return
+
+            page += 1
 
     @staticmethod
     def _ensure_success(status: int, strategy: str) -> None:

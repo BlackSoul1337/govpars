@@ -37,6 +37,10 @@ class SourceBlockedError(RetriableSourceError):
         )
 
 
+class LeaseLostError(RuntimeError):
+    """The task lease is no longer owned by the current worker."""
+
+
 def is_permanent_http_status(status: int | None) -> bool:
     """Return True only for resource states that retries cannot repair."""
 

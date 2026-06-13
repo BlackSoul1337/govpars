@@ -4,12 +4,14 @@ import asyncio
 import math
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
 from procurement_parser.domain.errors import (
+    LeaseLostError,
     RetriableSourceError,
     is_permanent_http_status,
 )
@@ -35,6 +37,42 @@ from procurement_parser.metrics import (
 
 logger = structlog.get_logger()
 DISCOVERY_PROGRESS_INTERVAL_SECONDS = 5
+
+
+async def gather_fail_fast(
+    awaitables: Sequence[Awaitable[Any]],
+) -> list[Any]:
+    tasks = [asyncio.ensure_future(value) for value in awaitables]
+    if not tasks:
+        return []
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        failure: BaseException | None = None
+        for task in done:
+            if task.cancelled():
+                failure = asyncio.CancelledError()
+                break
+            exception = task.exception()
+            if exception is not None:
+                failure = exception
+                break
+        if failure is not None:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise failure
+        if pending:
+            await asyncio.gather(*pending)
+        return [task.result() for task in tasks]
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,10 +482,9 @@ class WorkerService:
             for index in range(self.worker_count)
         ]
         try:
-            await asyncio.gather(*workers)
-        except asyncio.CancelledError:
+            await gather_fail_fast(workers)
+        except BaseException:
             self.request_shutdown()
-            await asyncio.gather(*workers, return_exceptions=True)
             raise
         finally:
             await asyncio.gather(
@@ -583,6 +620,16 @@ class WorkerService:
 
         try:
             batch = await self.adapter.extract(task.identity)
+            self._validate_extracted_batch(batch, task)
+            lease_extended = await self.frontier.extend_lease(
+                task,
+                worker_id=worker_id,
+                lease_seconds=self.lease_seconds,
+            )
+            if not lease_extended:
+                raise LeaseLostError(
+                    f"Task {task.id} lease was lost before persistence"
+                )
             await self.entities.persist(batch.entities, batch.relations)
             await self.frontier.enqueue(batch.discovered)
             content_hash = self._task_content_hash(batch.entities, task)
@@ -616,6 +663,15 @@ class WorkerService:
             ).inc()
             outcome = "blocked"
             logger.warning("task_blocked", error=str(exc))
+        except LeaseLostError as exc:
+            await stop_heartbeat()
+            TASK_OUTCOMES.labels(
+                source=task.identity.source.value,
+                entity_type=task.identity.entity_type.value,
+                outcome="lease_lost",
+            ).inc()
+            outcome = "lease_lost"
+            logger.warning("task_lease_lost", error=str(exc))
         except Exception as exc:
             await stop_heartbeat()
             response = getattr(exc, "response", None)
@@ -681,11 +737,56 @@ class WorkerService:
                 return
 
     @staticmethod
+    def _validate_extracted_batch(
+        batch,
+        task: FrontierTask,
+    ) -> None:
+        entity_keys = [
+            envelope.entity.identity.stable_key
+            for envelope in batch.entities
+        ]
+        primary_count = entity_keys.count(task.identity.stable_key)
+        if primary_count != 1:
+            raise ValueError(
+                "Extraction contract violation: expected exactly one primary "
+                f"entity for {task.identity.stable_key}, got {primary_count}"
+            )
+        if len(entity_keys) != len(set(entity_keys)):
+            raise ValueError("Extraction contract violation: duplicate entity identities")
+
+        expected_source = task.identity.source
+        if any(
+            envelope.entity.identity.source != expected_source
+            for envelope in batch.entities
+        ):
+            raise ValueError("Extraction contract violation: cross-source entity")
+        if any(
+            relation.source != expected_source
+            or relation.parent.source != expected_source
+            or relation.child.source != expected_source
+            for relation in batch.relations
+        ):
+            raise ValueError("Extraction contract violation: cross-source relation")
+        if any(
+            item.identity.source != expected_source
+            for item in batch.discovered
+        ):
+            raise ValueError("Extraction contract violation: cross-source discovery")
+
+        primary = next(
+            envelope
+            for envelope in batch.entities
+            if envelope.entity.identity.stable_key == task.identity.stable_key
+        )
+        if not primary.entity.source_payload:
+            raise ValueError("Extraction contract violation: primary raw payload is empty")
+
+    @staticmethod
     def _task_content_hash(
         envelopes: Sequence[EntityEnvelope],
         task: FrontierTask,
-    ) -> str | None:
+    ) -> str:
         for envelope in envelopes:
             if envelope.entity.identity.stable_key == task.identity.stable_key:
                 return envelope.content_hash
-        return envelopes[0].content_hash if envelopes else None
+        raise ValueError("Extraction contract violation: primary entity is missing")

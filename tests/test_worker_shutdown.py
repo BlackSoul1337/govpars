@@ -1,10 +1,16 @@
+import asyncio
+
+import pytest
+
 from procurement_parser.application.pipeline import WorkerService
 from procurement_parser.domain.models import (
+    EntityEnvelope,
     EntityIdentity,
     EntityType,
     ExtractedBatch,
     FrontierActivity,
     FrontierTask,
+    ProcurementEntity,
     Source,
 )
 
@@ -16,12 +22,22 @@ class FakeAdapter:
         self.on_extract = None
         self.error = None
 
-    async def extract(self, _identity):
+    async def extract(self, identity):
         if self.on_extract:
             self.on_extract()
         if self.error:
             raise self.error
-        return ExtractedBatch()
+        return ExtractedBatch(
+            entities=[
+                EntityEnvelope(
+                    entity=ProcurementEntity(
+                        identity=identity,
+                        source_payload={"id": identity.source_entity_id},
+                    ),
+                    content_hash=f"{int(identity.source_entity_id):064x}",
+                )
+            ]
+        )
 
 
 class FakeFrontier:
@@ -66,8 +82,11 @@ class FakeFrontier:
 
 
 class FakeEntities:
+    def __init__(self):
+        self.persisted = []
+
     async def persist(self, _entities, _relations):
-        return None
+        self.persisted.append((_entities, _relations))
 
 
 def _task(task_id: int) -> FrontierTask:
@@ -155,3 +174,127 @@ async def test_worker_does_not_retry_missing_source_resource() -> None:
     assert frontier.failed[0][0] == 404
     assert frontier.failed[0][1]["http_status"] == 404
     assert frontier.retried == []
+
+
+@pytest.mark.parametrize(
+    "batch",
+    [
+        ExtractedBatch(),
+        ExtractedBatch(
+            entities=[
+                EntityEnvelope(
+                    entity=ProcurementEntity(
+                        identity=EntityIdentity(
+                            source=Source.EEP_MITWORK,
+                            entity_type=EntityType.LOT,
+                            source_entity_id="different",
+                            canonical_url=(
+                                "https://eep.mitwork.kz/ru/publics/lot/different"
+                            ),
+                        ),
+                        source_payload={"id": "different"},
+                    ),
+                    content_hash="d" * 64,
+                )
+            ]
+        ),
+    ],
+)
+async def test_worker_retries_extraction_contract_violations(batch) -> None:
+    class InvalidBatchAdapter(FakeAdapter):
+        async def extract(self, _identity):
+            return batch
+
+    frontier = FakeFrontier([])
+    entities = FakeEntities()
+    service = WorkerService(
+        adapter=InvalidBatchAdapter(),
+        frontier=frontier,
+        entities=entities,
+        worker_count=1,
+        claim_batch_size=1,
+        lease_seconds=30,
+        backfill_capacity_percent=20,
+        max_attempts=3,
+    )
+
+    await service._process_task(
+        _task(10),
+        worker_id="test-worker",
+        run_id="test-run",
+    )
+
+    assert frontier.completed == []
+    assert frontier.retried[0][0] == 10
+    assert "Extraction contract violation" in frontier.retried[0][1]["error"]
+
+
+async def test_worker_does_not_persist_after_losing_lease() -> None:
+    class LostLeaseFrontier(FakeFrontier):
+        async def extend_lease(self, _task, *, worker_id, lease_seconds):
+            return False
+
+    frontier = LostLeaseFrontier([])
+    entities = FakeEntities()
+    service = WorkerService(
+        adapter=FakeAdapter(),
+        frontier=frontier,
+        entities=entities,
+        worker_count=1,
+        claim_batch_size=1,
+        lease_seconds=30,
+        backfill_capacity_percent=20,
+        max_attempts=3,
+    )
+
+    await service._process_task(
+        _task(11),
+        worker_id="test-worker",
+        run_id="test-run",
+    )
+
+    assert entities.persisted == []
+    assert frontier.completed == []
+    assert frontier.retried == []
+    assert frontier.failed == []
+
+
+async def test_worker_failure_cancels_siblings_and_releases_leases() -> None:
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class FailingFrontier(FakeFrontier):
+        async def claim(self, worker_id, **_kwargs):
+            if "-0-" in worker_id:
+                await sibling_started.wait()
+                raise RuntimeError("database unavailable")
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+        async def release_by_owner(self, worker_id):
+            self.released.append(worker_id)
+            return 0
+
+    frontier = FailingFrontier([])
+    service = WorkerService(
+        adapter=FakeAdapter(),
+        frontier=frontier,
+        entities=FakeEntities(),
+        worker_count=2,
+        claim_batch_size=1,
+        lease_seconds=30,
+        backfill_capacity_percent=20,
+        max_attempts=3,
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await asyncio.wait_for(service.run(), timeout=1)
+
+    assert sibling_cancelled.is_set()
+    assert service.shutdown_requested.is_set()
+    assert service.worker_ids == set()
+    assert len(frontier.released) >= 2

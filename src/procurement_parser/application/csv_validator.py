@@ -5,6 +5,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from procurement_parser.domain.csv_safety import is_spreadsheet_formula
+
 DATASET_IDENTITY_COLUMNS = {
     "lots": ("source", "source_entity_id"),
     "notices": ("source", "source_entity_id"),
@@ -28,6 +30,8 @@ def validate_csv(path: Path, *, dataset: str | None = None) -> dict[str, Any]:
     replacement_characters = 0
     row_count = 0
     empty_identity_rows = 0
+    malformed_rows = 0
+    formula_like_cells = 0
     identities: Counter[tuple[str, ...]] = Counter()
     inferred_dataset = dataset or _dataset_from_filename(path)
     identity_columns = DATASET_IDENTITY_COLUMNS.get(inferred_dataset, ())
@@ -40,10 +44,21 @@ def validate_csv(path: Path, *, dataset: str | None = None) -> dict[str, Any]:
         headers = reader.fieldnames or []
         for row in reader:
             row_count += 1
+            if None in row or any(
+                value is None
+                for key, value in row.items()
+                if key is not None
+            ):
+                malformed_rows += 1
             replacement_characters += sum(
                 value.count("\ufffd")
                 for value in row.values()
-                if value
+                if isinstance(value, str)
+            )
+            formula_like_cells += sum(
+                is_spreadsheet_formula(value)
+                for value in row.values()
+                if isinstance(value, str)
             )
             if identity_columns:
                 identity = tuple((row.get(column) or "").strip() for column in identity_columns)
@@ -64,10 +79,14 @@ def validate_csv(path: Path, *, dataset: str | None = None) -> dict[str, Any]:
         errors.append("missing CSV header")
     if replacement_characters:
         errors.append("contains Unicode replacement characters")
+    if malformed_rows:
+        errors.append("contains rows with a different number of columns")
     if empty_identity_rows:
         errors.append("contains rows with incomplete identity")
     if duplicate_identity_rows:
         errors.append("contains duplicate identity rows")
+    if formula_like_cells:
+        errors.append("contains spreadsheet formula-like cells")
     return {
         "path": str(path),
         "dataset": inferred_dataset,
@@ -76,6 +95,8 @@ def validate_csv(path: Path, *, dataset: str | None = None) -> dict[str, Any]:
         "delimiter": delimiter,
         "utf8_bom": has_bom,
         "replacement_characters": replacement_characters,
+        "malformed_rows": malformed_rows,
+        "formula_like_cells": formula_like_cells,
         "empty_identity_rows": empty_identity_rows,
         "duplicate_identity_rows": duplicate_identity_rows,
         "valid": not errors,

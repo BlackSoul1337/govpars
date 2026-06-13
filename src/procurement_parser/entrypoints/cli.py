@@ -4,7 +4,9 @@ import asyncio
 import json
 import signal
 import time
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,15 +17,19 @@ from procurement_parser.application.csv_validator import (
     validate_csv,
     validate_export_directory,
 )
-from procurement_parser.application.factory import build_context
-from procurement_parser.application.pipeline import DiscoveryService, WorkerService
-from procurement_parser.application.scheduler import run_scheduler
+from procurement_parser.application.pipeline import (
+    DiscoveryService,
+    WorkerService,
+    gather_fail_fast,
+)
 from procurement_parser.config.settings import (
     configure_discovery_concurrency,
     discovery_concurrency,
     load_settings,
 )
 from procurement_parser.domain.models import EntityType, Source
+from procurement_parser.entrypoints.runtime import build_context
+from procurement_parser.entrypoints.scheduler import run_scheduler
 from procurement_parser.infrastructure.captcha.solvers import build_captcha_solver
 from procurement_parser.infrastructure.network.proxy_pool import (
     build_proxy_pool,
@@ -873,16 +879,18 @@ def run(
                             for result in worker_result
                             if isinstance(result, BaseException)
                         ]
-                    results = await asyncio.gather(
-                        current_discovery_job(),
-                        current_worker.run(),
-                        return_exceptions=True,
-                    )
-                    return [
-                        result
-                        for result in results
-                        if isinstance(result, BaseException)
-                    ]
+                    try:
+                        await gather_fail_fast(
+                            [
+                                current_discovery_job(),
+                                current_worker.run(),
+                            ]
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as exc:
+                        return [exc]
+                    return []
 
                 pipeline_results = await asyncio.gather(
                     *(
@@ -949,6 +957,16 @@ def export(
         str,
         typer.Option(help="comma or semicolon; use semicolon for ru-RU Excel"),
     ] = "comma",
+    excel_safe: Annotated[
+        bool,
+        typer.Option(
+            "--excel-safe/--raw-csv",
+            help=(
+                "Prefix spreadsheet formula-like text with an apostrophe. "
+                "Use --raw-csv only for machine-to-machine exports."
+            ),
+        ),
+    ] = True,
 ) -> None:
     async def execute() -> None:
         if layout not in {"combined", "split", "both"}:
@@ -958,36 +976,90 @@ def export(
             raise typer.BadParameter("--delimiter must be comma or semicolon")
         settings = _settings("eep-mitwork", "local", "direct", "disabled")
         context = build_context(settings)
+        exported_files: dict[str, int] = {}
         try:
             exporter = PostgresCsvExporter(
                 context.database,
                 delimiter=delimiter_chars[delimiter],
+                excel_safe=excel_safe,
             )
             output_dir = output if output.suffix == "" else output.parent
             if dataset == "all":
-                if layout in {"combined", "both"}:
+                if layout == "both":
+                    results = await exporter.export_all_both(output_dir)
+                    for key, count in results.items():
+                        parts = key.split(":")
+                        if parts[0] == "combined":
+                            destination = output_dir / f"{parts[1]}.csv"
+                        else:
+                            source_slug = parts[2].replace("-", "_")
+                            destination = (
+                                output_dir / f"{parts[1]}_{source_slug}.csv"
+                            )
+                        exported_files[str(destination)] = count
+                        typer.echo(f"Exported {count} rows to {destination}")
+                elif layout == "combined":
                     results = await exporter.export_all(output_dir)
                     for name, count in results.items():
-                        typer.echo(f"Exported {count} rows to {output_dir / f'{name}.csv'}")
-                if layout in {"split", "both"}:
+                        destination = output_dir / f"{name}.csv"
+                        exported_files[str(destination)] = count
+                        typer.echo(f"Exported {count} rows to {destination}")
+                elif layout == "split":
                     results = await exporter.export_all_split(output_dir)
                     for key, count in results.items():
                         name, source = key.split(":", 1)
                         source_slug = source.replace("-", "_")
+                        destination = output_dir / f"{name}_{source_slug}.csv"
+                        exported_files[str(destination)] = count
                         typer.echo(
                             f"Exported {count} rows to "
-                            f"{output_dir / f'{name}_{source_slug}.csv'}"
+                            f"{destination}"
                         )
             else:
-                if layout in {"combined", "both"}:
+                if layout == "both":
+                    results = await exporter.export_both(
+                        dataset,
+                        output,
+                        output_dir,
+                    )
+                    exported_files[str(output)] = results["combined"]
+                    typer.echo(
+                        f"Exported {results['combined']} rows to {output}"
+                    )
+                    for source in ("eep-mitwork", "zakup-sk"):
+                        source_slug = source.replace("-", "_")
+                        destination = (
+                            output_dir / f"{dataset}_{source_slug}.csv"
+                        )
+                        count = results[f"split:{source}"]
+                        exported_files[str(destination)] = count
+                        typer.echo(f"Exported {count} rows to {destination}")
+                elif layout == "combined":
                     count = await exporter.export(dataset, output)
+                    exported_files[str(output)] = count
                     typer.echo(f"Exported {count} rows to {output}")
-                if layout in {"split", "both"}:
+                elif layout == "split":
                     results = await exporter.export_split(dataset, output_dir)
                     for source, count in results.items():
                         source_slug = source.replace("-", "_")
                         destination = output_dir / f"{dataset}_{source_slug}.csv"
+                        exported_files[str(destination)] = count
                         typer.echo(f"Exported {count} rows to {destination}")
+            manifest_path = output_dir / "export_manifest.json"
+            manifest = {
+                "generated_at": datetime.now(UTC).isoformat(),
+                "dataset": dataset,
+                "layout": layout,
+                "delimiter": delimiter,
+                "excel_safe": excel_safe,
+                "files": exported_files,
+            }
+            await asyncio.to_thread(
+                _write_json_atomic,
+                manifest_path,
+                manifest,
+            )
+            typer.echo(f"Wrote export manifest to {manifest_path}")
         finally:
             await context.close()
 
@@ -1576,6 +1648,18 @@ def release_stale_leases(
             await context.close()
 
     asyncio.run(execute())
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

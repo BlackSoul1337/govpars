@@ -51,6 +51,7 @@ playwright/**/auth/
 *.sqlite3
 *.db
 *.bak
+.tmp_spreadsheet
 
 # Untrusted/generated proxy inputs and outputs
 free-proxy-list.json

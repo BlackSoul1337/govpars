@@ -54,7 +54,6 @@ source = ["procurement_parser"]
 omit = [
     "*/__main__.py",
     "*/entrypoints/*",
-    "*/application/factory.py",
     "*/sources/*/adapter.py",
     "*/sources/*/browser.py",
     "*/sources/*/bundle_cache.py",

@@ -80,7 +80,7 @@ This successful smoke does not make free proxies suitable for production SLA.
 
 | Requirement | Status | Notes |
 |---|---|---|
-| Clean Architecture Lite | ready | Application no longer imports source-specific errors |
+| Clean Architecture Lite | ready | Domain/application do not import infrastructure/entrypoints; enforced by an AST test |
 | Vertical source slices | ready | EEP and Zakup are isolated |
 | Durable ETL | ready | Discovery, queue, extraction, persistence, relations |
 | PostgreSQL SSOT | ready | Data, queue, revisions, runtime and scheduler state |
@@ -95,7 +95,7 @@ This successful smoke does not make free proxies suitable for production SLA.
 | Manual/2captcha | ready | DB budget, advisory lock, token disposal |
 | Durable scheduler | ready | Refresh and weekly reconciliation |
 | Embedded Prometheus | ready | No FastAPI/Granian |
-| Eight CSV datasets | ready | combined/split/both |
+| Eight Excel-safe CSV datasets | ready | combined/split/both, one snapshot per run, atomic publication |
 | Hash-aware revisions | ready | changes/off |
 | TEMP COPY replay | ready | One-connection integration test |
 | Clean and upgrade migrations | ready | 0001 rewritten, 0006 path checked |

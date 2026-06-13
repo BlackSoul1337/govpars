@@ -98,6 +98,7 @@ async def test_postgres_queue_upsert_and_revision_cycle() -> None:
             lease_seconds=60,
         )
         assert len(tasks) == 1
+        stale_task = tasks[0]
         await frontier.retry(
             tasks[0],
             error="integration transport failure",
@@ -112,6 +113,36 @@ async def test_postgres_queue_upsert_and_revision_cycle() -> None:
             lease_seconds=60,
         )
         assert len(tasks) == 1
+        assert not await frontier.extend_lease(
+            stale_task,
+            worker_id="integration-worker",
+            lease_seconds=60,
+        )
+        await frontier.complete(stale_task, content_hash="stale")
+        await frontier.retry(
+            stale_task,
+            error="stale retry",
+            delay_seconds=0,
+        )
+        await frontier.fail(stale_task, error="stale failure")
+        async with database.sessions() as session:
+            lease = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT q.attempt, q.lease_owner, q.last_error
+                        FROM crawl_frontier q
+                        JOIN source_entities se ON se.id = q.source_entity_fk
+                        WHERE se.source = 'eep-mitwork'
+                          AND se.entity_type = 'lot'
+                          AND se.source_entity_id = 'integration-651383'
+                        """
+                    )
+                )
+            ).mappings().one()
+        assert lease["attempt"] == tasks[0].attempt
+        assert lease["lease_owner"] == "integration-worker"
+        assert lease["last_error"] == "integration transport failure"
 
         html = (FIXTURES / "eep_lot.html").read_text(encoding="utf-8")
         batch = parse_detail(html, identity)

@@ -426,11 +426,29 @@ uv run procurement-parser export --dataset all `
 uv run procurement-parser export --dataset all `
   --output exports/excel --layout split --delimiter semicolon
 
+# Только для машинной обработки без Excel-защиты
+uv run procurement-parser export --dataset all `
+  --output exports/raw --layout split --raw-csv
+
 uv run procurement-parser validate-export --input exports/all
 ```
 
 CSV создаются как UTF-8 с BOM. Validator проверяет заголовки, U+FFFD,
-duplicate identities и соответствие combined/split row counts.
+ширину строк, spreadsheet formula-like значения, duplicate identities и
+соответствие combined/split row counts. По умолчанию потенциально активные для
+Excel значения (`=`, `+`, `-`, `@`) экранируются апострофом. `--raw-csv`
+отключает защиту и предназначен только для контролируемой машинной обработки.
+Для procurement datasets UTC-колонки `published_at`,
+`application_start_at`, `application_end_at` дополнены удобными для чтения
+`published_at_local`, `application_start_at_local`,
+`application_end_at_local`. Локальные значения рассчитаны для
+`source_timezone=Asia/Almaty`; UTC остаётся каноническим временем БД.
+После экспорта создаётся `export_manifest.json` с временем генерации, режимом и
+числом строк в каждом файле.
+Все файлы одного запуска `all`/`both` читаются из одного PostgreSQL
+`REPEATABLE READ` snapshot. Каждый CSV и manifest публикуются атомарной заменой,
+поэтому незавершённый экспорт не оставляет обрезанный финальный файл.
+
 Стандартный delimiter — запятая. При открытии двойным кликом русская версия
 Excel часто ожидает `;`; используйте `--delimiter semicolon` либо импорт через
 «Данные → Из текста/CSV».
@@ -448,6 +466,178 @@ uv run procurement-parser prune-history --retention-days 90
 ```powershell
 docker compose exec postgres psql -U procurement -d procurement
 ```
+
+### Как читать собранные данные
+
+Для выборок и аналитики используйте представления `export_*`: они уже
+соединяют внутренний ключ `source_entity_fk` с идентичностью из
+`source_entities` и совпадают по структуре с CSV datasets.
+
+| Представление | Содержимое |
+| --- | --- |
+| `export_lots` | лоты |
+| `export_procurement_notices` | объявления EEP `/buy` и закупки Zakup `advert` |
+| `export_plan_items` | пункты планов EEP `/point` |
+| `export_organizations` | организации |
+| `export_entity_relations` | направленные связи между сущностями |
+| `export_delivery_places` | места поставки |
+| `export_payment_terms` | условия оплаты |
+| `export_documents` | метаданные и URL документов, без скачивания файлов |
+
+Идентичность сущности задаётся тройкой
+`(source, entity_type, source_entity_id)`. `source_entity_id` является ID
+страницы/API, а `business_number` — отображаемым номером закупки или лота; они
+не обязаны совпадать. Внутренний `source_entities.id` предназначен для
+внешних ключей БД и не является ID сайта.
+
+Основные типы связей:
+
+- `plan_to_notice`: пункт плана EEP → объявление;
+- `plan_to_lot`: пункт плана EEP → лот;
+- `notice_to_lot`: объявление/закупка → лот;
+- `organizer`: сущность → организация-организатор;
+- `customer`: сущность → организация-заказчик.
+
+Связь хранится направленно: колонки `parent_*` указывают исходную сущность,
+`child_*` — связанную. Отсутствие связи допустимо: например, пункт плана EEP
+может ещё не иметь объявления, а ссылка источника может вести на уже
+недоступную карточку.
+
+Количество сохранённых сущностей:
+
+```sql
+SELECT source, entity_type, count(*)
+FROM source_entities
+WHERE last_success_at IS NOT NULL
+GROUP BY source, entity_type
+ORDER BY source, entity_type;
+```
+
+50 закупок с самым коротким приёмом заявок:
+
+```sql
+SELECT
+    source,
+    source_entity_id,
+    title_ru,
+    application_start_at_local AS start_local,
+    application_end_at_local AS end_local,
+    application_end_at - application_start_at AS duration,
+    canonical_url
+FROM export_procurement_notices
+WHERE application_start_at IS NOT NULL
+  AND application_end_at IS NOT NULL
+  AND application_end_at > application_start_at
+ORDER BY duration
+LIMIT 50;
+```
+
+Лоты конкретной закупки:
+
+```sql
+SELECT
+    n.source,
+    n.source_entity_id AS notice_id,
+    n.title_ru AS notice_title,
+    l.source_entity_id AS lot_id,
+    l.business_number AS lot_number,
+    l.title_ru AS lot_title,
+    l.total_amount,
+    l.currency,
+    l.canonical_url
+FROM export_procurement_notices n
+JOIN export_entity_relations r
+  ON r.parent_source = n.source
+ AND r.parent_type = 'notice'
+ AND r.parent_id = n.source_entity_id
+ AND r.relation_type = 'notice_to_lot'
+JOIN export_lots l
+  ON l.source = r.child_source
+ AND r.child_type = 'lot'
+ AND l.source_entity_id = r.child_id
+WHERE n.source = 'zakup-sk'
+  AND n.source_entity_id = '1229637'
+ORDER BY l.source_entity_id;
+```
+
+Полные цепочки EEP «план → объявление → лот»:
+
+```sql
+SELECT
+    p.source_entity_id AS plan_id,
+    p.title_ru AS plan_title,
+    n.source_entity_id AS notice_id,
+    n.title_ru AS notice_title,
+    l.source_entity_id AS lot_id,
+    l.title_ru AS lot_title
+FROM export_plan_items p
+JOIN export_entity_relations pn
+  ON pn.parent_source = p.source
+ AND pn.parent_type = 'plan_item'
+ AND pn.parent_id = p.source_entity_id
+ AND pn.relation_type = 'plan_to_notice'
+JOIN export_procurement_notices n
+  ON n.source = pn.child_source
+ AND pn.child_type = 'notice'
+ AND n.source_entity_id = pn.child_id
+JOIN export_entity_relations nl
+  ON nl.parent_source = n.source
+ AND nl.parent_type = 'notice'
+ AND nl.parent_id = n.source_entity_id
+ AND nl.relation_type = 'notice_to_lot'
+JOIN export_lots l
+  ON l.source = nl.child_source
+ AND nl.child_type = 'lot'
+ AND l.source_entity_id = nl.child_id
+WHERE p.source = 'eep-mitwork'
+ORDER BY p.source_entity_id::bigint
+LIMIT 100;
+```
+
+`JOIN` выше возвращает только существующие полные цепочки. Чтобы найти планы,
+у которых пока нет объявления, используйте отдельный запрос:
+
+```sql
+SELECT
+    p.source_entity_id AS plan_id,
+    p.title_ru,
+    p.status,
+    p.canonical_url
+FROM export_plan_items p
+WHERE p.source = 'eep-mitwork'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM export_entity_relations r
+      WHERE r.parent_source = p.source
+        AND r.parent_type = 'plan_item'
+        AND r.parent_id = p.source_entity_id
+        AND r.relation_type = 'plan_to_notice'
+  )
+ORDER BY p.source_entity_id::bigint
+LIMIT 100;
+```
+
+Документы лота и доступ к source-specific данным:
+
+```sql
+SELECT filename, category, extension, url, size_bytes
+FROM export_documents
+WHERE source = 'zakup-sk'
+  AND entity_type = 'lot'
+  AND source_entity_id = '4452106';
+
+SELECT
+    source_entity_id,
+    source_payload ->> 'status' AS raw_status,
+    jsonb_pretty(source_payload) AS raw_payload
+FROM export_lots
+WHERE source = 'zakup-sk'
+  AND source_entity_id = '4452106';
+```
+
+UTC-поля являются каноническими. Колонки с суффиксом `_local` рассчитаны для
+`source_timezone` и предназначены для отображения и отчётов. Для программной
+обработки JSONB используйте PostgreSQL-операторы `->`, `->>` и `@>`.
 
 Backup/restore:
 

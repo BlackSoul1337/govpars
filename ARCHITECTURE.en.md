@@ -12,15 +12,17 @@ discover → enqueue → extract → normalize → persist → discover relation
 ```text
 domain: models, errors, ports
   ↑
-application: discovery, workers, scheduler, validation
+application: discovery, workers, validation
   ↑
 infrastructure: EEP, Zakup, PostgreSQL, network, CAPTCHA
   ↑
-entrypoints: Typer CLI
+entrypoints: Typer CLI, scheduler, runtime composition
 ```
 
-Application code depends on domain contracts, not source-specific
-infrastructure exceptions. Construction is isolated in the factory.
+Application code depends on domain contracts and imports neither infrastructure
+nor entrypoints. Concrete repositories, source adapters, and CAPTCHA providers
+are assembled in `entrypoints/runtime.py`. Scheduler is a driving entrypoint and
+therefore lives beside the CLI instead of inside application.
 
 ## Why This Architecture
 

@@ -1,3 +1,5 @@
+"""Runtime composition root for concrete adapters and repositories."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
